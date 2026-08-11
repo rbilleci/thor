@@ -195,9 +195,9 @@ Routine findings, repairs and re-reviews remain entirely within the Slice Ownerâ
 
 
 ## Important rules
-- The reviewer that raised a finding must confirm its resolution.
+- The reviewer that raised a finding must confirm its resolution. This means it must be maintained until it reports a PASS/APPROVE, or until this agent's work is complete. If the reviewer agent failed, attempt to recover by launching a new one and giving it the additional context it needs.
 - The Slice Owner must assess the repair itself, not merely the original finding, for newly affected lenses.
-- The Slice Owner performs any repairs in batch and rerun the reviewer(s) that raised the finding and any lenses materially affected by the repair.
+- The Slice Owner performs any repairs in batch and rerun the reviewer(s) that raised the finding and any lenses materially affected by the repair. No other agent is allowed to conduct repairs.
 - A reviewer pass applies only to the candidate it examined.
 - Evidence-only changes do not require unrelated code lenses to rerun.
 
