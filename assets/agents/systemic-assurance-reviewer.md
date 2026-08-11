@@ -1,7 +1,7 @@
 ---
 id: systemic-assurance-reviewer
 description: "Second-tier read-only reviewer for emergent cross-lens risk, shared assumptions, end-to-end responsibility gaps, compound transitions, negative space, and whole-system assurance coherence after all ten lens reviewers pass one candidate."
-model: frontier
+model: systemic-assurance-reviewer
 requestedAccess: read-only
 ---
 
