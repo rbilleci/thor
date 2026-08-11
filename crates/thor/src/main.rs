@@ -155,7 +155,7 @@ struct LocationArgs {
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
 enum TargetArg {
     All,
-    ClaudeCode,
+    Claude,
     Codex,
 }
 
@@ -688,7 +688,7 @@ fn validate_payload_path(path: &str) -> Result<()> {
     validate_archive_path(path)?;
     let pieces = path.split('/').collect::<Vec<_>>();
     match pieces.as_slice() {
-        ["targets", "claude-code", "agents", filename] if filename.ends_with(".md") => {
+        ["targets", "claude", "agents", filename] if filename.ends_with(".md") => {
             validate_identifier(&filename[..filename.len() - 3])
         }
         ["targets", "codex", "agents", filename] if filename.ends_with(".toml") => {
@@ -810,7 +810,7 @@ fn enforce_compatibility(
 
 fn detect_harness_version(target: &Harness) -> Option<Version> {
     let binary = match target {
-        Harness::ClaudeCode => "claude",
+        Harness::Claude => "claude",
         Harness::Codex => "codex",
     };
     let output = Command::new(binary).arg("--version").output().ok()?;
@@ -1339,15 +1339,15 @@ fn safe_destination(root: &Path, target: &Harness, destination: &str) -> Result<
 fn validate_destination(target: &Harness, destination: &str) -> Result<()> {
     validate_relative_path(destination)?;
     let expected_agents = match target {
-        Harness::ClaudeCode => ".claude/agents/",
+        Harness::Claude => ".claude/agents/",
         Harness::Codex => ".codex/agents/",
     };
     let expected_skills = match target {
-        Harness::ClaudeCode => ".claude/skills/",
+        Harness::Claude => ".claude/skills/",
         Harness::Codex => ".agents/skills/",
     };
     if let Some(filename) = destination.strip_prefix(expected_agents) {
-        let extension = if matches!(target, Harness::ClaudeCode) {
+        let extension = if matches!(target, Harness::Claude) {
             ".md"
         } else {
             ".toml"
@@ -1389,7 +1389,7 @@ fn select_targets(
     let available = &manifest.targets;
     let selected = match requested {
         TargetArg::All => previous.map_or_else(|| available.clone(), ToOwned::to_owned),
-        TargetArg::ClaudeCode => vec![Harness::ClaudeCode],
+        TargetArg::Claude => vec![Harness::Claude],
         TargetArg::Codex => vec![Harness::Codex],
     };
     if selected.is_empty() || selected.iter().any(|target| !available.contains(target)) {
@@ -1404,7 +1404,7 @@ fn select_targets(
 fn select_state_targets(state: &InstallState, requested: TargetArg) -> Result<Vec<Harness>> {
     let selected = match requested {
         TargetArg::All => state.targets.clone(),
-        TargetArg::ClaudeCode => vec![Harness::ClaudeCode],
+        TargetArg::Claude => vec![Harness::Claude],
         TargetArg::Codex => vec![Harness::Codex],
     };
     if selected
@@ -1539,12 +1539,12 @@ fn visible_definitions_from_writes(writes: &[PendingWrite]) -> Result<Vec<Visibl
 
 fn visible_definition_from_payload(write: &PendingWrite) -> Result<Option<VisibleDefinition>> {
     let agent_prefix = match write.target {
-        Harness::ClaudeCode => ".claude/agents/",
+        Harness::Claude => ".claude/agents/",
         Harness::Codex => ".codex/agents/",
     };
     if write.destination.starts_with(agent_prefix) {
         let name = match write.target {
-            Harness::ClaudeCode => parse_markdown_name(&write.bytes, "agent")?,
+            Harness::Claude => parse_markdown_name(&write.bytes, "agent")?,
             Harness::Codex => parse_toml_name(&write.bytes, "agent")?,
         };
         return Ok(Some(VisibleDefinition {
@@ -1554,7 +1554,7 @@ fn visible_definition_from_payload(write: &PendingWrite) -> Result<Option<Visibl
         }));
     }
     let skill_root = match write.target {
-        Harness::ClaudeCode => ".claude/skills/",
+        Harness::Claude => ".claude/skills/",
         Harness::Codex => ".agents/skills/",
     };
     if let Some(rest) = write.destination.strip_prefix(skill_root)
@@ -1572,11 +1572,11 @@ fn visible_definition_from_payload(write: &PendingWrite) -> Result<Option<Visibl
 
 fn visible_definition_from_managed(file: &ManagedFile) -> Result<Option<VisibleDefinition>> {
     let agent_prefix = match file.target {
-        Harness::ClaudeCode => ".claude/agents/",
+        Harness::Claude => ".claude/agents/",
         Harness::Codex => ".codex/agents/",
     };
     if let Some(filename) = file.destination.strip_prefix(agent_prefix) {
-        let extension = if matches!(file.target, Harness::ClaudeCode) {
+        let extension = if matches!(file.target, Harness::Claude) {
             ".md"
         } else {
             ".toml"
@@ -1591,7 +1591,7 @@ fn visible_definition_from_managed(file: &ManagedFile) -> Result<Option<VisibleD
         }));
     }
     let skill_root = match file.target {
-        Harness::ClaudeCode => ".claude/skills/",
+        Harness::Claude => ".claude/skills/",
         Harness::Codex => ".agents/skills/",
     };
     if let Some(rest) = file.destination.strip_prefix(skill_root) {
@@ -1634,11 +1634,11 @@ fn scan_discovery_root(
         .map(|definition| definition.target.clone())
         .collect::<BTreeSet<_>>();
     let mut definitions = Vec::new();
-    if selected.contains(&Harness::ClaudeCode) {
+    if selected.contains(&Harness::Claude) {
         scan_claude_agents(&root.join(".claude/agents"), &mut definitions)?;
         scan_skills(
             &root.join(".claude/skills"),
-            Harness::ClaudeCode,
+            Harness::Claude,
             &mut definitions,
         )?;
     }
@@ -1681,7 +1681,7 @@ fn scan_claude_agents(
             definitions.push((
                 path,
                 VisibleDefinition {
-                    target: Harness::ClaudeCode,
+                    target: Harness::Claude,
                     kind: VisibleKind::Agent,
                     name: parse_markdown_name(&bytes, "agent")?,
                 },
@@ -1818,7 +1818,7 @@ fn installation_plan(
     let mut writes = BTreeMap::<String, PendingWrite>::new();
     for target in targets {
         let (agent_destination, skill_destination, agent_extension) = match target {
-            Harness::ClaudeCode => (".claude/agents", ".claude/skills", ".md"),
+            Harness::Claude => (".claude/agents", ".claude/skills", ".md"),
             Harness::Codex => (".codex/agents", ".agents/skills", ".toml"),
         };
         let prefix = format!("targets/{}/agents/", target.as_str());
@@ -2784,10 +2784,10 @@ mod tests {
         let claude = b"---\nname: writer\ndescription: Write\n---\n\nWrite.\n".to_vec();
         let initial = verified_payload_bundle(
             "1.2.0",
-            vec![Harness::ClaudeCode, Harness::Codex],
+            vec![Harness::Claude, Harness::Codex],
             BTreeMap::from([
                 ("targets/codex/agents/reviewer.toml".to_owned(), codex),
-                ("targets/claude-code/agents/writer.md".to_owned(), claude),
+                ("targets/claude/agents/writer.md".to_owned(), claude),
             ]),
         );
         let directory = tempdir().unwrap();
@@ -2796,7 +2796,7 @@ mod tests {
             root: directory.path().to_path_buf(),
             state_root: directory.path().join(".thor"),
         };
-        let all_targets = vec![Harness::ClaudeCode, Harness::Codex];
+        let all_targets = vec![Harness::Claude, Harness::Codex];
         let (mut initial_state, initial_writes) =
             installation_plan(&initial, location.scope, &location.root, &all_targets).unwrap();
         let state_path = state_path(
@@ -2816,7 +2816,7 @@ mod tests {
         .unwrap();
         let replacement = verified_payload_bundle(
             "1.3.0",
-            vec![Harness::ClaudeCode, Harness::Codex],
+            vec![Harness::Claude, Harness::Codex],
             BTreeMap::new(),
         );
         let selected = vec![Harness::Codex];
@@ -2841,7 +2841,7 @@ mod tests {
                 .exists()
         );
         assert!(directory.path().join(".claude/agents/writer.md").is_file());
-        assert_eq!(state.targets, vec![Harness::ClaudeCode]);
+        assert_eq!(state.targets, vec![Harness::Claude]);
 
         let final_previous = state.clone();
         apply_install(
@@ -2945,7 +2945,7 @@ mod tests {
         fs::create_dir_all(&unmanaged).unwrap();
         fs::write(unmanaged.join("someone-else.md"), &agent).unwrap();
         let writes = vec![PendingWrite {
-            target: Harness::ClaudeCode,
+            target: Harness::Claude,
             destination: ".claude/agents/reviewer.md".to_owned(),
             sha256: sha256_hex(&agent),
             bytes: agent,
@@ -3201,7 +3201,7 @@ mod tests {
             created_directories: Vec::new(),
         };
         let retained = ManagedFile {
-            target: Harness::ClaudeCode,
+            target: Harness::Claude,
             destination: ".claude/agents/reviewer.md".to_owned(),
             sha256: "1".repeat(64),
         };

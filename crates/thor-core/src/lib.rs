@@ -50,16 +50,16 @@ pub enum ThorError {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Harness {
-    ClaudeCode,
+    Claude,
     Codex,
 }
 
 impl Harness {
-    pub const ALL: [Self; 2] = [Self::ClaudeCode, Self::Codex];
+    pub const ALL: [Self; 2] = [Self::Claude, Self::Codex];
 
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::ClaudeCode => "claude-code",
+            Self::Claude => "claude",
             Self::Codex => "codex",
         }
     }
@@ -88,20 +88,20 @@ pub struct PackageMetadata {
 pub struct PackageSpec {
     pub targets: Vec<Harness>,
     pub models: BTreeMap<String, ModelMapping>,
-    pub efforts: BTreeMap<Effort, EffortMapping>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelMapping {
     pub description: String,
-    pub targets: BTreeMap<Harness, String>,
+    pub targets: BTreeMap<Harness, TargetModel>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct EffortMapping {
-    pub targets: BTreeMap<Harness, String>,
+pub struct TargetModel {
+    pub model: String,
+    pub effort: Effort,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
@@ -115,8 +115,6 @@ pub enum Effort {
 }
 
 impl Effort {
-    pub const ALL: [Self; 5] = [Self::Low, Self::Medium, Self::High, Self::Xhigh, Self::Max];
-
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Low => "low",
@@ -134,7 +132,6 @@ pub struct AgentFrontmatter {
     pub id: String,
     pub description: String,
     pub model: String,
-    pub effort: Effort,
     #[serde(rename = "requestedAccess")]
     pub requested_access: RequestedAccess,
     #[serde(default)]
@@ -144,8 +141,7 @@ pub struct AgentFrontmatter {
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentTargets {
-    #[serde(rename = "claude-code")]
-    pub claude_code: Option<ClaudeSettings>,
+    pub claude: Option<ClaudeSettings>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -295,7 +291,7 @@ impl SourcePack {
                 format!("target {} is not enabled for this pack", target.as_str()),
             );
         }
-        let model = self
+        let mapping = self
             .manifest
             .spec
             .models
@@ -308,32 +304,16 @@ impl SourcePack {
                     agent.frontmatter.model,
                     target.as_str()
                 ),
-            })?
-            .clone();
-        let effort = self
-            .manifest
-            .spec
-            .efforts
-            .get(&agent.frontmatter.effort)
-            .and_then(|mapping| mapping.targets.get(&target))
-            .ok_or_else(|| ThorError::Validation {
-                path: agent.source_path.clone(),
-                message: format!(
-                    "effort {} has no {} mapping",
-                    agent.frontmatter.effort.as_str(),
-                    target.as_str()
-                ),
-            })?
-            .clone();
+            })?;
 
         Ok(ResolvedAgent {
             id: agent.frontmatter.id.clone(),
             description: agent.frontmatter.description.clone(),
             instructions: agent.instructions.clone(),
             requested_access: agent.frontmatter.requested_access,
-            claude_settings: agent.frontmatter.targets.claude_code.clone(),
-            model,
-            effort,
+            claude_settings: agent.frontmatter.targets.claude.clone(),
+            model: mapping.model.clone(),
+            effort: mapping.effort.as_str().to_owned(),
         })
     }
 }
@@ -621,43 +601,11 @@ fn validate_manifest(manifest: &PackageManifest, path: &Path) -> Result<()> {
             if model
                 .targets
                 .get(target)
-                .is_none_or(|value| value.trim().is_empty())
+                .is_none_or(|mapping| mapping.model.trim().is_empty())
             {
                 return validation(
                     path,
                     format!("every model must map target {}", target.as_str()),
-                );
-            }
-        }
-    }
-    for effort in Effort::ALL {
-        let mapping = manifest
-            .spec
-            .efforts
-            .get(&effort)
-            .ok_or_else(|| ThorError::Validation {
-                path: path.to_path_buf(),
-                message: format!("missing effort mapping {}", effort.as_str()),
-            })?;
-        for target in &manifest.spec.targets {
-            let Some(value) = mapping.targets.get(target) else {
-                return validation(
-                    path,
-                    format!(
-                        "effort {} must map target {}",
-                        effort.as_str(),
-                        target.as_str()
-                    ),
-                );
-            };
-            if !is_supported_effort_value(value) {
-                return validation(
-                    path,
-                    format!(
-                        "effort {} has unsupported {} value {value:?}",
-                        effort.as_str(),
-                        target.as_str()
-                    ),
                 );
             }
         }
@@ -901,10 +849,6 @@ fn reject_hard_link(path: &Path) -> Result<()> {
     )
 }
 
-fn is_supported_effort_value(value: &str) -> bool {
-    matches!(value, "low" | "medium" | "high" | "xhigh" | "max")
-}
-
 fn validation<T>(path: impl AsRef<Path>, message: impl Into<String>) -> Result<T> {
     Err(ThorError::Validation {
         path: path.as_ref().to_path_buf(),
@@ -931,30 +875,27 @@ metadata:
   version: 1.2.0
   description: Engineering agents.
 spec:
-  targets: [claude-code, codex]
+  targets: [claude, codex]
   models:
     fast:
       description: Fast work.
-      targets: { claude-code: haiku, codex: gpt-5.6-luna }
+      targets:
+        claude: { model: haiku, effort: low }
+        codex: { model: gpt-5.6-luna, effort: low }
     frontier:
       description: Deep work.
-      targets: { claude-code: opus, codex: gpt-5.6 }
-  efforts:
-    low: { targets: { claude-code: low, codex: low } }
-    medium: { targets: { claude-code: medium, codex: medium } }
-    high: { targets: { claude-code: high, codex: high } }
-    xhigh: { targets: { claude-code: xhigh, codex: xhigh } }
-    max: { targets: { claude-code: max, codex: max } }
+      targets:
+        claude: { model: opus, effort: xhigh }
+        codex: { model: gpt-5.6, effort: xhigh }
 "#;
 
     const AGENT: &str = r#"---
 id: pr-reviewer
 description: Reviews a pull request for correctness and test gaps.
 model: frontier
-effort: xhigh
 requestedAccess: read-only
 targets:
-  claude-code:
+  claude:
     maxTurns: 20
     background: false
 ---
@@ -985,7 +926,7 @@ Review the requested change and report actionable findings only.
         let directory = fixture_pack();
         let pack = SourcePack::load(directory.path()).unwrap();
         let agent = &pack.agents[0];
-        let claude = render_claude(&pack.resolve(agent, Harness::ClaudeCode).unwrap());
+        let claude = render_claude(&pack.resolve(agent, Harness::Claude).unwrap());
         assert!(claude.contains("permissionMode: plan"));
         assert!(claude.contains("tools: Read, Grep, Glob"));
         assert!(claude.contains("maxTurns: 20"));
@@ -1010,6 +951,19 @@ Review the requested change and report actionable findings only.
     }
 
     #[test]
+    fn rejects_agent_level_effort() {
+        let directory = fixture_pack();
+        let agent_path = directory.path().join("agents/pr-reviewer.md");
+        fs::write(
+            &agent_path,
+            AGENT.replace("model: frontier", "model: frontier\neffort: high"),
+        )
+        .unwrap();
+        let error = SourcePack::load(directory.path()).unwrap_err();
+        assert!(error.to_string().contains("schema validation failed"));
+    }
+
+    #[test]
     fn rejects_filename_id_mismatch() {
         let directory = fixture_pack();
         let original = directory.path().join("agents/pr-reviewer.md");
@@ -1023,14 +977,14 @@ Review the requested change and report actionable findings only.
     }
 
     #[test]
-    fn rejects_an_unsupported_effort_mapping() {
+    fn rejects_an_unsupported_model_effort() {
         let directory = fixture_pack();
         let manifest_path = directory.path().join("thor.yaml");
         fs::write(
             &manifest_path,
             MANIFEST.replace(
-                "claude-code: max, codex: max",
-                "claude-code: max, codex: ultra",
+                "model: gpt-5.6, effort: xhigh",
+                "model: gpt-5.6, effort: ultra",
             ),
         )
         .unwrap();
@@ -1049,8 +1003,11 @@ Review the requested change and report actionable findings only.
                 .is_ok()
         );
 
-        let invalid: serde_yaml::Value =
-            serde_yaml::from_str(&MANIFEST.replace("codex: gpt-5.6", "rogue: gpt-5.6")).unwrap();
+        let invalid: serde_yaml::Value = serde_yaml::from_str(&MANIFEST.replace(
+            "codex: { model: gpt-5.6, effort: xhigh }",
+            "rogue: { model: gpt-5.6, effort: xhigh }",
+        ))
+        .unwrap();
         assert!(
             validator
                 .validate(&serde_json::to_value(invalid).unwrap())

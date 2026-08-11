@@ -1,0 +1,28 @@
+apiVersion: thor/v1alpha1
+kind: AgentPack
+metadata:
+  name: thor
+  version: 0.1.0
+  description: Thor Software Development Runtime
+spec:
+  targets: [ claude, codex ]
+  models:
+    lens-reviewer:
+      description: Lens Reviewer
+      targets:
+        claude: { model: haiku, effort: high }
+        codex: { model: gpt-5.6-luna, effort: high }
+    balanced:
+      description: Balanced Model
+      targets:
+        claude: { model: sonnet, effort: high }
+        codex: { model: gpt-5.6-terra, effort: high }
+    frontier:
+      description: Highest capability for systemic assurance and implementation ownership.
+      targets:
+        claude:
+          model: haiku
+          effort: xhigh
+        codex:
+          model: gpt-5.6-luna
+          effort: xhigh

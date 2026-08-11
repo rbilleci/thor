@@ -15,6 +15,8 @@ use thor_core::{
 };
 use zip::{CompressionMethod, ZipWriter, write::FileOptions};
 
+const DEFAULT_SOURCE_DIRECTORY: &str = "assets";
+
 #[derive(Debug, Parser)]
 #[command(
     name = "thor-build",
@@ -29,12 +31,12 @@ struct Cli {
 enum Command {
     /// Validate a Thor agent-pack source directory.
     Validate {
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = DEFAULT_SOURCE_DIRECTORY)]
         source: PathBuf,
     },
     /// Transform a Thor agent pack into one target's generated definitions.
     Transform {
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = DEFAULT_SOURCE_DIRECTORY)]
         source: PathBuf,
         #[arg(long)]
         target: String,
@@ -43,7 +45,7 @@ enum Command {
     },
     /// Transform, validate, and sign a deterministic release bundle.
     Bundle {
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = DEFAULT_SOURCE_DIRECTORY)]
         source: PathBuf,
         #[arg(long)]
         out: PathBuf,
@@ -59,7 +61,7 @@ enum Command {
         #[arg(long, default_value = "0.1.0")]
         minimum_thor_version: String,
         #[arg(long)]
-        claude_code_compatibility: Option<String>,
+        claude_compatibility: Option<String>,
         #[arg(long)]
         codex_compatibility: Option<String>,
     },
@@ -110,14 +112,14 @@ fn main() -> Result<()> {
             source_repository,
             source_commit,
             minimum_thor_version,
-            claude_code_compatibility,
+            claude_compatibility,
             codex_compatibility,
         } => {
             let metadata = BundleMetadata {
                 source_repository,
                 source_commit,
                 minimum_thor_version,
-                claude_code_compatibility,
+                claude_compatibility,
                 codex_compatibility,
             };
             let (archive, signature) = bundle(&source, &signing_key, &metadata)?;
@@ -169,7 +171,7 @@ struct BundleMetadata {
     source_repository: String,
     source_commit: String,
     minimum_thor_version: String,
-    claude_code_compatibility: Option<String>,
+    claude_compatibility: Option<String>,
     codex_compatibility: Option<String>,
 }
 
@@ -246,7 +248,7 @@ fn transform(source: &Path, target: Harness, out: &Path) -> Result<()> {
     for agent in &pack.agents {
         let resolved = pack.resolve(agent, target.clone())?;
         let (filename, content) = match target {
-            Harness::ClaudeCode => (format!("{}.md", resolved.id), render_claude(&resolved)),
+            Harness::Claude => (format!("{}.md", resolved.id), render_claude(&resolved)),
             Harness::Codex => (
                 format!("{}.toml", resolved.id),
                 render_codex(&resolved).context("failed to render Codex agent")?,
@@ -302,8 +304,8 @@ fn bundle(
         for agent in &pack.agents {
             let resolved = pack.resolve(agent, target.clone())?;
             let (path, content) = match target {
-                Harness::ClaudeCode => (
-                    format!("targets/claude-code/agents/{}.md", resolved.id),
+                Harness::Claude => (
+                    format!("targets/claude/agents/{}.md", resolved.id),
                     render_claude(&resolved),
                 ),
                 Harness::Codex => (
@@ -384,7 +386,7 @@ fn compatibility_for(
     let mut compatibility = std::collections::BTreeMap::new();
     for target in targets {
         let value = match target {
-            Harness::ClaudeCode => metadata.claude_code_compatibility.as_deref(),
+            Harness::Claude => metadata.claude_compatibility.as_deref(),
             Harness::Codex => metadata.codex_compatibility.as_deref(),
         }
         .filter(|value| !value.trim().is_empty())
@@ -491,9 +493,9 @@ fn signature_path(bundle: &Path) -> PathBuf {
 
 fn parse_target(value: &str) -> Result<Harness> {
     match value {
-        "claude-code" => Ok(Harness::ClaudeCode),
+        "claude" => Ok(Harness::Claude),
         "codex" => Ok(Harness::Codex),
-        _ => bail!("target must be claude-code or codex"),
+        _ => bail!("target must be claude or codex"),
     }
 }
 
@@ -513,29 +515,33 @@ apiVersion: thor/v1alpha1
 kind: AgentPack
 metadata: { name: acme-engineering, version: 1.2.0, description: Agents. }
 spec:
-  targets: [claude-code, codex]
+  targets: [claude, codex]
   models:
     frontier:
       description: Deep work.
-      targets: { claude-code: opus, codex: gpt-5.6 }
-  efforts:
-    low: { targets: { claude-code: low, codex: low } }
-    medium: { targets: { claude-code: medium, codex: medium } }
-    high: { targets: { claude-code: high, codex: high } }
-    xhigh: { targets: { claude-code: xhigh, codex: xhigh } }
-    max: { targets: { claude-code: max, codex: max } }
+      targets:
+        claude: { model: opus, effort: high }
+        codex: { model: gpt-5.6, effort: high }
 "#;
 
     const AGENT: &str = r#"---
 id: reviewer
 description: Reviews changes.
 model: frontier
-effort: high
 requestedAccess: read-only
 ---
 
 Review the change.
 "#;
+
+    #[test]
+    fn defaults_to_the_assets_source_directory() {
+        let cli = Cli::try_parse_from(["thor-build", "validate"]).unwrap();
+        let Command::Validate { source } = cli.command else {
+            panic!("expected validate command");
+        };
+        assert_eq!(source, PathBuf::from(DEFAULT_SOURCE_DIRECTORY));
+    }
 
     #[test]
     fn transform_refuses_to_mix_with_stale_output() {
@@ -602,7 +608,7 @@ Review the change.
             source_repository: "acme/agent-pack".to_owned(),
             source_commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
             minimum_thor_version: "0.1.0".to_owned(),
-            claude_code_compatibility: Some(">=1.0.0".to_owned()),
+            claude_compatibility: Some(">=1.0.0".to_owned()),
             codex_compatibility: Some(">=1.0.0".to_owned()),
         };
 
@@ -625,6 +631,11 @@ Review the change.
         assert!(
             manifest
                 .payloads
+                .contains_key("targets/claude/agents/reviewer.md")
+        );
+        assert!(
+            manifest
+                .payloads
                 .contains_key("targets/codex/agents/reviewer.toml")
         );
         assert!(
@@ -640,7 +651,7 @@ Review the change.
             source_repository: "acme/agent-pack".to_owned(),
             source_commit: "0123456".to_owned(),
             minimum_thor_version: "0.1.0".to_owned(),
-            claude_code_compatibility: Some(">=1.0.0".to_owned()),
+            claude_compatibility: Some(">=1.0.0".to_owned()),
             codex_compatibility: Some(">=1.0.0".to_owned()),
         };
         assert!(validate_bundle_metadata(&short_commit).is_err());
@@ -649,7 +660,7 @@ Review the change.
             source_repository: "acme/agent-pack".to_owned(),
             source_commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
             minimum_thor_version: "0.1.0".to_owned(),
-            claude_code_compatibility: Some("not a range".to_owned()),
+            claude_compatibility: Some("not a range".to_owned()),
             codex_compatibility: Some(">=1.0.0".to_owned()),
         };
         assert!(compatibility_for(&Harness::ALL, &invalid_range).is_err());

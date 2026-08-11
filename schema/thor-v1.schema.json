@@ -13,22 +13,23 @@
     },
     "target": {
       "type": "string",
-      "enum": ["claude-code", "codex"]
+      "enum": ["claude", "codex"]
     },
-    "targetValueMap": {
+    "targetModelMap": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "claude-code": { "type": "string", "minLength": 1 },
-        "codex": { "type": "string", "minLength": 1 }
+        "claude": { "$ref": "#/$defs/targetModel" },
+        "codex": { "$ref": "#/$defs/targetModel" }
       }
     },
-    "targetEffortMap": {
+    "targetModel": {
       "type": "object",
       "additionalProperties": false,
+      "required": ["model", "effort"],
       "properties": {
-        "claude-code": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"] },
-        "codex": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"] }
+        "model": { "type": "string", "minLength": 1 },
+        "effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"] }
       }
     },
     "packageManifest": {
@@ -51,7 +52,7 @@
         "spec": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["targets", "models", "efforts"],
+          "required": ["targets", "models"],
           "properties": {
             "targets": {
               "type": "array",
@@ -69,49 +70,28 @@
                 "required": ["description", "targets"],
                 "properties": {
                   "description": { "type": "string", "minLength": 1 },
-                  "targets": { "$ref": "#/$defs/targetValueMap" }
+                  "targets": { "$ref": "#/$defs/targetModelMap" }
                 }
-              }
-            },
-            "efforts": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["low", "medium", "high", "xhigh", "max"],
-              "properties": {
-                "low": { "$ref": "#/$defs/effortMapping" },
-                "medium": { "$ref": "#/$defs/effortMapping" },
-                "high": { "$ref": "#/$defs/effortMapping" },
-                "xhigh": { "$ref": "#/$defs/effortMapping" },
-                "max": { "$ref": "#/$defs/effortMapping" }
               }
             }
           }
         }
       }
     },
-    "effortMapping": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["targets"],
-      "properties": {
-        "targets": { "$ref": "#/$defs/targetEffortMap" }
-      }
-    },
     "agentFrontmatter": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "description", "model", "effort", "requestedAccess"],
+      "required": ["id", "description", "model", "requestedAccess"],
       "properties": {
         "id": { "$ref": "#/$defs/identifier" },
         "description": { "type": "string", "minLength": 1, "pattern": "^[^\\r\\n]+$" },
         "model": { "$ref": "#/$defs/identifier" },
-        "effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"] },
         "requestedAccess": { "type": "string", "enum": ["inherit", "read-only", "workspace-write"] },
         "targets": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "claude-code": {
+            "claude": {
               "type": "object",
               "additionalProperties": false,
               "properties": {
