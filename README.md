@@ -6,7 +6,7 @@ they never transform an agent pack and do not need Rust, Java, or either
 harness's build tooling.
 
 The normative design and source-format contract are in
-[THOR-DESIGN.md](THOR-DESIGN.md).
+[docs/design.md](docs/design.md).
 
 ## What it provides
 
@@ -48,7 +48,7 @@ my-pack/
 `thor.yaml` owns the package-wide target list and logical model/effort
 mappings. Each agent owns its description, instructions, model id, effort id,
 access profile, and allowed Claude-only settings. See the complete examples
-and the Claude/Codex field mapping in [THOR-DESIGN.md](THOR-DESIGN.md).
+and the Claude/Codex field mapping in [docs/design.md](docs/design.md).
 
 Pack CI validates and creates a release bundle. It must supply the immutable
 commit resolved from the release tag and a CI-held 32-byte Ed25519 signing seed
