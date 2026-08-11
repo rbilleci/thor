@@ -1,7 +1,7 @@
 ---
 id: slicer
 description: "Trusted end-to-end owner for one bounded repository outcome. Implements, validates, invokes all eleven reviewers, repairs findings, and returns only a terminal result to the Work Dispatcher."
-model: frontier
+model: slicer
 requestedAccess: workspace-write
 ---
 
