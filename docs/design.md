@@ -4,7 +4,7 @@
 
 Thor is a source format and release workflow for defining reusable subagents once and installing prebuilt definitions into Claude Code, Codex, and later harnesses.
 
-The canonical source is a small YAML package manifest, one Markdown file per agent, and standard Agent Skills directories. CI validates and transforms the source into immutable target artifacts. A local `thor` command installs those artifacts; it never transforms source YAML and never needs either harness's compiler or configuration model.
+The canonical source is a small YAML package manifest, one Markdown file per agent, and standard Agent Skills directories. CI validates and transforms the source into immutable target artifacts. Pack authors may also render directly into a project's harness discovery locations to dogfood the pack. A local `thor` command installs release artifacts; it never transforms source YAML and never needs either harness's compiler or configuration model.
 
 This deliberately keeps the portable surface small. Each agent owns its explicit settings in its own Markdown file; the root manifest owns package-wide model classes that resolve both target model and effort.
 
@@ -14,7 +14,8 @@ This deliberately keeps the portable surface small. Each agent owns its explicit
 - Keep all target model and effort mapping global, never repeated in an agent.
 - Install, update, and uninstall both agents and standard skills from a GitHub repository/release.
 - Make every installed file attributable to an exact release and safely removable.
-- Produce Claude Code and Codex definitions in CI/CD only.
+- Render reviewable Claude Code and Codex dogfood snapshots from the portable
+  source, then package signed release artifacts in CI/CD.
 - Keep the Rust implementation small, auditable, and easy to add a future target to.
 
 ## Non-goals for v1
@@ -367,23 +368,41 @@ Thor is one Rust workspace with two binaries and one small shared library. This 
 Cargo workspace
 ├── schema/        # Sole normative thor-v1.schema.json source
 ├── thor-core      # Strict source types, frontmatter, manifests, digests, signatures
-├── thor-build     # CI-only transformer and packager
+├── thor-build     # Pack-author transformer and packager
 └── thor            # Native local init/update/uninstall CLI
 ```
 
 `Cargo.lock` and `rust-toolchain.toml` are committed. `thor-core` embeds the versioned schema and exposes the same validation entry points to both binaries; neither binary carries a second hand-maintained field list.
 
-### `thor-build`: CI-only transformer and packager
+### `thor-build`: pack-author transformer and packager
 
-`thor-build` is compiled and run in CI; it is not a user-facing download:
+`thor-build` is compiled for pack CI and for pack-author dogfooding; it is not an
+end-user configuration tool:
 
 ```text
 thor-build <command>
 ├── validate [--source <pack-directory>]                         # defaults to assets/
-├── transform [--source <pack-directory>] --target <claude|codex> --out <directory>
+├── transform [--source <pack-directory>] [--target <claude|codex|all>]
+│             [--root <project-root>] [--check]                  # defaults: all, .
 └── bundle [--source <pack-directory>] --out <zip> --signing-key <seed-file>
            --source-repository <owner/repository> --source-commit <commit>
 ```
+
+`transform` writes the selected target's agents and complete skills directly to
+the documented project discovery locations. Claude output is
+`<root>/.claude/agents/` plus `<root>/.claude/skills/`; Codex output is
+`<root>/.codex/agents/` plus `<root>/.agents/skills/`. Each harness root stores
+a tracked `.thor-generated.json` inventory of the files that `transform` owns.
+`assets/` remains the only authoring source; the generated harness files are
+reviewable snapshots that let a fresh clone exercise the pack through each
+harness's normal discovery paths. On refresh, `transform` writes source-derived
+paths, removes only inventory-listed paths, and preserves unrelated harness
+files. It rejects a file at a required path when no inventory owns that path,
+and it rejects symbolic links in a harness root, generated path, or
+generated-path parent.
+`transform --check` compares the source-derived tree with the tracked snapshots
+without writing files, so CI rejects stale generated definitions. The workflow
+does not retain an intermediate `dist/` tree.
 
 | Component | Responsibility |
 |---|---|
@@ -415,9 +434,10 @@ thor <command>
 
 Use `clap`, `serde`, `serde_yaml`, `serde_json`, `jsonschema`, `toml_edit`, `reqwest`, `sha2`, an Ed25519 crate, a ZIP crate, and a cross-platform file-lock crate. Keep Markdown-frontmatter parsing deliberately small and covered by fixtures rather than introducing an expansive rendering system. Avoid an embedded scripting runtime.
 
-The Thor tool pipeline uses pinned-by-digest CI actions, a pinned Rust toolchain, a committed lockfile, clean release runners, and protected signing secrets. It runs `cargo fmt --check`, `cargo clippy -- -D warnings`, unit and property tests (including path and recovery tests), dependency/license vulnerability checks, and reproducible-release checks before it signs a release. It builds `thor-build` on one supported Linux runner and builds the released `thor` binary in an operating-system/architecture matrix, using native macOS runners for macOS artifacts and a musl target for portable Linux where appropriate. The installed CLI is self-contained: its only external requirement is normal OS facilities for HTTPS and file access.
+The Thor tool pipeline uses pinned-by-digest CI actions, a pinned Rust toolchain, a committed lockfile, clean release runners, and protected signing secrets. It runs `cargo fmt --check`, `cargo clippy -- -D warnings`, unit and property tests (including path and recovery tests), and `thor-build transform --check` before it signs a release. The check compares the source-derived harness outputs with the tracked snapshots. The pipeline also runs dependency/license vulnerability checks and reproducible-release checks. It builds `thor-build` on one supported Linux runner and builds the released `thor` binary in an operating-system/architecture matrix, using native macOS runners for macOS artifacts and a musl target for portable Linux where appropriate. The installed CLI is self-contained: its only external requirement is normal OS facilities for HTTPS and file access.
 
-Do not introduce a database, daemon, external registry, dynamic plugin loading, or local transformation code.
+Do not introduce a database, daemon, external registry, dynamic plugin loading,
+or source transformation code in the end-user `thor` lifecycle CLI.
 
 ## Build sequence
 

@@ -1,9 +1,9 @@
 # Thor
 
-Thor defines a reusable subagent once and produces verified Claude Code and
-Codex definitions in CI. End-user machines install signed, prebuilt bundles;
-they never transform an agent pack and do not need Rust, Java, or either
-harness's build tooling.
+Thor defines a reusable subagent once, renders tracked Claude Code and Codex
+dogfood snapshots, and packages verified release bundles in CI. End-user
+machines install signed, prebuilt bundles; they never transform an agent pack
+and do not need Rust, Java, or either harness's build tooling.
 
 The normative design and source-format contract are in
 [docs/design.md](docs/design.md).
@@ -13,7 +13,8 @@ The normative design and source-format contract are in
 - One portable agent definition per `assets/agents/<id>.md` file.
 - A small `assets/thor.yaml` manifest for package metadata plus global logical model
   mappings, each of which supplies target model and Codex-aligned effort.
-- CI-only rendering for Claude Code (`.md`) and Codex (`.toml`).
+- Pack-author rendering directly into Claude Code (`.md`) and Codex (`.toml`)
+  project discovery directories for dogfooding.
 - Standard `assets/skills/<name>/SKILL.md` directories copied unchanged to each
   target's documented skill location.
 - Deterministic, signed agent-pack bundles and a native Rust `thor` lifecycle
@@ -25,7 +26,7 @@ The normative design and source-format contract are in
 - `schema/` — canonical versioned Thor JSON Schema.
 - `crates/thor-core/` — strict source parsing, validation, skills handling,
   and target renderers.
-- `crates/thor-build/` — CI-only validator, transformer, packager, and
+- `crates/thor-build/` — pack-author validator, transformer, packager, and
   release-manifest signer.
 - `crates/thor/` — native lifecycle installer; it does no transformation.
 - `scripts/` — POSIX and PowerShell native-binary bootstraps.
@@ -60,7 +61,7 @@ encoded as lowercase hex:
 thor-build validate
 thor-build bundle \
   --source assets \
-  --out dist/thor-bundle-1.2.0.zip \
+  --out "$RUNNER_TEMP/thor-bundle-1.2.0.zip" \
   --signing-key "$THOR_PACK_SIGNING_KEY_FILE" \
   --source-repository acme/my-pack \
   --source-commit "$(git rev-parse HEAD)" \
@@ -70,8 +71,31 @@ thor-build bundle \
 
 Publish only `thor-bundle-1.2.0.zip` and its generated `.sig` alongside the
 immutable `v1.2.0` GitHub Release. The transformer refuses unsafe source files,
-invalid mappings, stale transform directories, and unportable/case-colliding
-skill paths.
+invalid mappings, unmanaged-path collisions, and unportable/case-colliding skill
+paths.
+
+## Dogfood the pack locally
+
+Render the pack straight into this project's harness discovery locations:
+
+```bash
+cargo run --locked -p thor-build -- transform
+```
+
+This writes Claude agents and skills to `.claude/agents/` and `.claude/skills/`,
+and Codex agents and skills to `.codex/agents/` and `.agents/skills/`. Git tracks
+these generated definitions as reviewable dogfood snapshots; `assets/` remains
+the only authoring source. Each harness root contains a generated
+`.thor-generated.json` inventory. On later runs, the transformer refreshes
+source-derived paths and removes only paths listed in that inventory, while it
+preserves unrelated harness files. It rejects an untracked file at a path Thor
+needs to generate.
+
+CI verifies the tracked snapshots without modifying them:
+
+```bash
+cargo run --locked -p thor-build -- transform --check
+```
 
 ## Install Thor
 
@@ -147,6 +171,8 @@ Development requires the pinned Rust toolchain in
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+cargo run --locked -p thor-build -- validate
+cargo run --locked -p thor-build -- transform --check
 ```
 
 The CI workflow runs these checks with Rust 1.97.1. The release workflow builds

@@ -4,8 +4,8 @@
 
 Thor is a Rust workspace. `crates/thor-core/` contains the portable pack model,
 validation, and Claude/Codex renderers; `crates/thor-build/` provides the
-CI-only validation, transformation, and signing CLI; and `crates/thor/` is the
-verified install/update lifecycle CLI. Treat `assets/` as the pack source of
+pack-author and CI validation, transformation, and signing CLI; and
+`crates/thor/` is the verified install/update lifecycle CLI. Treat `assets/` as the pack source of
 truth: `thor.yaml` is the manifest, `agents/<id>.md` defines agents, and
 `skills/<name>/SKILL.md` contains skills. The versioned JSON Schema is in
 `schema/`; design and format rules are documented in `docs/design.md`.

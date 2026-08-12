@@ -21,6 +21,10 @@ jobs:
         run: cargo +1.97.1 clippy --workspace --all-targets -- -D warnings
       - name: Run tests
         run: cargo +1.97.1 test --workspace
+      - name: Validate pack source
+        run: cargo +1.97.1 run --locked -p thor-build -- validate
+      - name: Check tracked harness definitions
+        run: cargo +1.97.1 run --locked -p thor-build -- transform --check
 
   bootstrap-posix:
     runs-on: ubuntu-24.04

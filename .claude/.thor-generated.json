@@ -1,0 +1,20 @@
+{
+  "format": "thor-generated-output/v1",
+  "output": "claude",
+  "paths": [
+    "agents/lens-architecture-boundaries-reviewer.md",
+    "agents/lens-concurrency-distributed-systems-reviewer.md",
+    "agents/lens-data-integrity-lifecycle-reviewer.md",
+    "agents/lens-functional-domain-correctness-reviewer.md",
+    "agents/lens-intent-scope-reviewer.md",
+    "agents/lens-interfaces-compatibility-reviewer.md",
+    "agents/lens-performance-scalability-reviewer.md",
+    "agents/lens-reliability-failure-behavior-reviewer.md",
+    "agents/lens-security-privacy-abuse-reviewer.md",
+    "agents/lens-verification-observability-change-safety-reviewer.md",
+    "agents/slicer.md",
+    "agents/systemic-assurance-reviewer.md",
+    "skills/author-content/SKILL.md",
+    "skills/dispatch-work/SKILL.md"
+  ]
+}

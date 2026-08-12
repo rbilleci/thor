@@ -1,7 +1,8 @@
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
     io::{Cursor, Write},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -16,15 +17,21 @@ use thor_core::{
 use zip::{CompressionMethod, ZipWriter, write::FileOptions};
 
 const DEFAULT_SOURCE_DIRECTORY: &str = "assets";
+const DEFAULT_PROJECT_ROOT: &str = ".";
+const GENERATED_OUTPUT_MANIFEST: &str = ".thor-generated.json";
+const GENERATED_OUTPUT_FORMAT: &str = "thor-generated-output/v1";
 
 #[derive(Debug, Parser)]
-#[command(
-    name = "thor-build",
-    about = "CI-only Thor source validator and transformer"
-)]
+#[command(name = "thor-build", about = "Thor source validator and transformer")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Debug, Clone)]
+enum TargetSelection {
+    All,
+    One(Harness),
 }
 
 #[derive(Debug, Subcommand)]
@@ -34,14 +41,19 @@ enum Command {
         #[arg(long, default_value = DEFAULT_SOURCE_DIRECTORY)]
         source: PathBuf,
     },
-    /// Transform a Thor agent pack into one target's generated definitions.
+    /// Transform a Thor agent pack into its project-local harness definitions.
     Transform {
         #[arg(long, default_value = DEFAULT_SOURCE_DIRECTORY)]
         source: PathBuf,
-        #[arg(long)]
+        /// One harness to transform, or all selected harnesses (the default).
+        #[arg(long, default_value = "all")]
         target: String,
+        /// Project root containing the harness discovery directories.
+        #[arg(long, default_value = DEFAULT_PROJECT_ROOT)]
+        root: PathBuf,
+        /// Verify that the harness definitions match the source without writing files.
         #[arg(long)]
-        out: PathBuf,
+        check: bool,
     },
     /// Transform, validate, and sign a deterministic release bundle.
     Bundle {
@@ -103,8 +115,9 @@ fn main() -> Result<()> {
         Command::Transform {
             source,
             target,
-            out,
-        } => transform(&source, parse_target(&target)?, &out)?,
+            root,
+            check,
+        } => transform(&source, parse_target_selection(&target)?, &root, check)?,
         Command::Bundle {
             source,
             out,
@@ -231,62 +244,460 @@ fn cli_release_manifest(assets_dir: &Path) -> Result<CliReleaseManifest> {
     })
 }
 
-fn transform(source: &Path, target: Harness, out: &Path) -> Result<()> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputKind {
+    Claude,
+    CodexAgents,
+    CodexSkills,
+}
+
+impl OutputKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::CodexAgents => "codex-agents",
+            Self::CodexSkills => "codex-skills",
+        }
+    }
+
+    fn allows_path(self, path: &Path) -> bool {
+        let components = path.components().collect::<Vec<_>>();
+        let Some(first) = components.first() else {
+            return false;
+        };
+        let Component::Normal(first) = first else {
+            return false;
+        };
+        match self {
+            Self::Claude => {
+                (*first == "agents"
+                    && components.len() == 2
+                    && path.extension().is_some_and(|extension| extension == "md"))
+                    || (*first == "skills" && components.len() >= 3)
+            }
+            Self::CodexAgents => {
+                *first == "agents"
+                    && components.len() == 2
+                    && path
+                        .extension()
+                        .is_some_and(|extension| extension == "toml")
+            }
+            Self::CodexSkills => *first == "skills" && components.len() >= 3,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct OutputPlan {
+    kind: OutputKind,
+    root: PathBuf,
+    desired: BTreeMap<PathBuf, Vec<u8>>,
+    previous: BTreeSet<PathBuf>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct GeneratedOutputManifest {
+    format: String,
+    output: String,
+    paths: Vec<String>,
+}
+
+fn transform(source: &Path, selection: TargetSelection, root: &Path, check: bool) -> Result<()> {
+    ensure_real_directory(root, "project root")?;
     let pack =
         SourcePack::load(source).with_context(|| format!("invalid source {}", source.display()))?;
-    if !pack.manifest.spec.targets.contains(&target) {
-        bail!(
-            "target {} is not selected by {}",
-            target.as_str(),
-            source.join("thor.yaml").display()
+    let targets = match selection {
+        TargetSelection::All => pack.manifest.spec.targets.clone(),
+        TargetSelection::One(target) => vec![target],
+    };
+    for target in &targets {
+        if !pack.manifest.spec.targets.contains(target) {
+            bail!(
+                "target {} is not selected by {}",
+                target.as_str(),
+                source.join("thor.yaml").display()
+            );
+        }
+    }
+    let skill_payloads = collect_skill_payloads(source.join("skills"))?;
+
+    let mut plans = output_plans(root, &pack, &targets, &skill_payloads)?;
+    for plan in &mut plans {
+        prepare_output_plan(plan)?;
+    }
+    if check {
+        let stale = plans.iter().any(output_plan_is_stale);
+        if stale {
+            bail!(
+                "generated harness definitions are stale; run `thor-build transform` to refresh them"
+            );
+        }
+        println!("generated harness definitions are current");
+        return Ok(());
+    }
+
+    for plan in &plans {
+        apply_output_plan(plan)?;
+    }
+    for target in &targets {
+        println!(
+            "generated {} agent(s) and {} skill file(s) for {}",
+            pack.agents.len(),
+            skill_payloads.len(),
+            target.as_str()
         );
     }
-    ensure_empty_output_directory(out)?;
-    let agents_dir = out.join("agents");
-    fs::create_dir_all(&agents_dir)
-        .with_context(|| format!("failed to create {}", agents_dir.display()))?;
-    for agent in &pack.agents {
-        let resolved = pack.resolve(agent, target.clone())?;
-        let (filename, content) = match target {
-            Harness::Claude => (format!("{}.md", resolved.id), render_claude(&resolved)),
-            Harness::Codex => (
-                format!("{}.toml", resolved.id),
-                render_codex(&resolved).context("failed to render Codex agent")?,
-            ),
-        };
-        let path = agents_dir.join(filename);
-        fs::write(&path, content).with_context(|| format!("failed to write {}", path.display()))?;
-    }
-    println!(
-        "generated {} agent(s) for {}",
-        pack.agents.len(),
-        target.as_str()
-    );
     Ok(())
 }
 
-fn ensure_empty_output_directory(out: &Path) -> Result<()> {
-    if out.exists() {
-        if !out.is_dir() {
-            bail!(
-                "output path {} exists and is not a directory",
-                out.display()
-            );
+fn output_plans(
+    root: &Path,
+    pack: &SourcePack,
+    targets: &[Harness],
+    skill_payloads: &BTreeMap<String, Vec<u8>>,
+) -> Result<Vec<OutputPlan>> {
+    let mut plans = Vec::new();
+    for target in targets {
+        match target {
+            Harness::Claude => {
+                let mut desired = BTreeMap::new();
+                for agent in &pack.agents {
+                    let resolved = pack.resolve(agent, Harness::Claude)?;
+                    insert_output_file(
+                        &mut desired,
+                        PathBuf::from("agents").join(format!("{}.md", resolved.id)),
+                        render_claude(&resolved).into_bytes(),
+                    )?;
+                }
+                add_skill_payloads(&mut desired, skill_payloads)?;
+                plans.push(OutputPlan {
+                    kind: OutputKind::Claude,
+                    root: root.join(".claude"),
+                    desired,
+                    previous: BTreeSet::new(),
+                });
+            }
+            Harness::Codex => {
+                let mut agents = BTreeMap::new();
+                for agent in &pack.agents {
+                    let resolved = pack.resolve(agent, Harness::Codex)?;
+                    insert_output_file(
+                        &mut agents,
+                        PathBuf::from("agents").join(format!("{}.toml", resolved.id)),
+                        render_codex(&resolved)
+                            .context("failed to render Codex agent")?
+                            .into_bytes(),
+                    )?;
+                }
+                plans.push(OutputPlan {
+                    kind: OutputKind::CodexAgents,
+                    root: root.join(".codex"),
+                    desired: agents,
+                    previous: BTreeSet::new(),
+                });
+                let mut skills = BTreeMap::new();
+                add_skill_payloads(&mut skills, skill_payloads)?;
+                plans.push(OutputPlan {
+                    kind: OutputKind::CodexSkills,
+                    root: root.join(".agents"),
+                    desired: skills,
+                    previous: BTreeSet::new(),
+                });
+            }
         }
-        if fs::read_dir(out)
-            .with_context(|| format!("failed to inspect {}", out.display()))?
-            .next()
-            .is_some()
-        {
-            bail!(
-                "output directory {} must be empty; transform never mixes generated files with existing output",
-                out.display()
-            );
-        }
-    } else {
-        fs::create_dir_all(out).with_context(|| format!("failed to create {}", out.display()))?;
+    }
+    Ok(plans)
+}
+
+fn insert_output_file(
+    desired: &mut BTreeMap<PathBuf, Vec<u8>>,
+    path: PathBuf,
+    contents: Vec<u8>,
+) -> Result<()> {
+    if desired.insert(path.clone(), contents).is_some() {
+        bail!("duplicate generated output path {}", path.display());
     }
     Ok(())
+}
+
+fn add_skill_payloads(
+    desired: &mut BTreeMap<PathBuf, Vec<u8>>,
+    skill_payloads: &BTreeMap<String, Vec<u8>>,
+) -> Result<()> {
+    for (archive_path, bytes) in skill_payloads {
+        let relative = archive_path
+            .strip_prefix("skills/")
+            .expect("skill payload paths always begin with skills/");
+        insert_output_file(
+            desired,
+            PathBuf::from("skills").join(relative),
+            bytes.clone(),
+        )?;
+    }
+    Ok(())
+}
+
+fn prepare_output_plan(plan: &mut OutputPlan) -> Result<()> {
+    ensure_real_or_missing_directory(&plan.root, "harness directory")?;
+    plan.previous = load_generated_output_manifest(plan)?;
+
+    for path in plan.previous.iter().chain(plan.desired.keys()) {
+        ensure_managed_path_is_safe(plan, path)?;
+    }
+    for path in plan.desired.keys() {
+        if !plan.previous.contains(path) && managed_file_exists(plan, path)? {
+            bail!(
+                "refusing to overwrite unmanaged harness definition {}",
+                plan.root.join(path).display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn load_generated_output_manifest(plan: &OutputPlan) -> Result<BTreeSet<PathBuf>> {
+    let marker = plan.root.join(GENERATED_OUTPUT_MANIFEST);
+    let metadata = match fs::symlink_metadata(&marker) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            bail!(
+                "generated-output manifest {} must not be a symlink",
+                marker.display()
+            );
+        }
+        Ok(metadata) if metadata.file_type().is_file() => metadata,
+        Ok(_) => bail!(
+            "generated-output manifest {} must be a file",
+            marker.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to inspect {}", marker.display()));
+        }
+    };
+    debug_assert!(metadata.file_type().is_file());
+    let manifest: GeneratedOutputManifest = serde_json::from_slice(
+        &fs::read(&marker).with_context(|| format!("failed to read {}", marker.display()))?,
+    )
+    .with_context(|| format!("invalid generated-output manifest {}", marker.display()))?;
+    if manifest.format != GENERATED_OUTPUT_FORMAT || manifest.output != plan.kind.as_str() {
+        bail!("invalid generated-output manifest {}", marker.display());
+    }
+    let mut paths = BTreeSet::new();
+    for path in manifest.paths {
+        let path = PathBuf::from(path);
+        validate_managed_relative_path(plan.kind, &path)?;
+        if !paths.insert(path.clone()) {
+            bail!(
+                "generated-output manifest {} lists {} more than once",
+                marker.display(),
+                path.display()
+            );
+        }
+    }
+    Ok(paths)
+}
+
+fn validate_managed_relative_path(kind: OutputKind, path: &Path) -> Result<()> {
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        || !kind.allows_path(path)
+    {
+        bail!(
+            "generated-output manifest contains an invalid {} path {}",
+            kind.as_str(),
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn ensure_managed_path_is_safe(plan: &OutputPlan, relative: &Path) -> Result<()> {
+    validate_managed_relative_path(plan.kind, relative)?;
+    let components = relative.components().collect::<Vec<_>>();
+    let mut current = plan.root.clone();
+    for (index, component) in components.iter().enumerate() {
+        let std::path::Component::Normal(component) = component else {
+            continue;
+        };
+        current.push(component);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                bail!(
+                    "generated output path {} must not be a symlink",
+                    current.display()
+                );
+            }
+            Ok(metadata) if index + 1 < components.len() && !metadata.file_type().is_dir() => {
+                bail!(
+                    "generated output parent {} must be a directory",
+                    current.display()
+                );
+            }
+            Ok(metadata) if index + 1 == components.len() && !metadata.file_type().is_file() => {
+                bail!("generated output path {} must be a file", current.display());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to inspect {}", current.display()));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn managed_file_exists(plan: &OutputPlan, relative: &Path) -> Result<bool> {
+    ensure_managed_path_is_safe(plan, relative)?;
+    match fs::symlink_metadata(plan.root.join(relative)) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error)
+            .with_context(|| format!("failed to inspect {}", plan.root.join(relative).display())),
+    }
+}
+
+fn output_plan_is_stale(plan: &OutputPlan) -> bool {
+    let expected_manifest = match generated_output_manifest_bytes(plan) {
+        Ok(bytes) => bytes,
+        Err(_) => return true,
+    };
+    match fs::read(plan.root.join(GENERATED_OUTPUT_MANIFEST)) {
+        Ok(bytes) if bytes == expected_manifest => {}
+        _ => return true,
+    }
+    plan.desired.iter().any(|(path, expected)| {
+        fs::read(plan.root.join(path))
+            .map(|contents| contents != *expected)
+            .unwrap_or(true)
+    })
+}
+
+fn apply_output_plan(plan: &OutputPlan) -> Result<()> {
+    fs::create_dir_all(&plan.root)
+        .with_context(|| format!("failed to create {}", plan.root.display()))?;
+    for (path, contents) in &plan.desired {
+        create_managed_parent_directories(plan, path)?;
+        if plan.previous.contains(path) || !managed_file_exists(plan, path)? {
+            fs::write(plan.root.join(path), contents)
+                .with_context(|| format!("failed to write {}", plan.root.join(path).display()))?;
+        }
+    }
+    let desired_paths = plan.desired.keys().cloned().collect::<BTreeSet<_>>();
+    for path in plan.previous.difference(&desired_paths) {
+        let full_path = plan.root.join(path);
+        if managed_file_exists(plan, path)? {
+            fs::remove_file(&full_path)
+                .with_context(|| format!("failed to remove {}", full_path.display()))?;
+            remove_empty_managed_parent_directories(plan, path)?;
+        }
+    }
+    fs::write(
+        plan.root.join(GENERATED_OUTPUT_MANIFEST),
+        generated_output_manifest_bytes(plan)?,
+    )
+    .with_context(|| {
+        format!(
+            "failed to write {}",
+            plan.root.join(GENERATED_OUTPUT_MANIFEST).display()
+        )
+    })?;
+    Ok(())
+}
+
+fn create_managed_parent_directories(plan: &OutputPlan, relative: &Path) -> Result<()> {
+    let parent = relative
+        .parent()
+        .expect("generated output path has a parent");
+    let mut current = plan.root.clone();
+    for component in parent.components() {
+        let std::path::Component::Normal(component) = component else {
+            continue;
+        };
+        current.push(component);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                bail!(
+                    "generated output directory {} must not be a symlink",
+                    current.display()
+                );
+            }
+            Ok(metadata) if metadata.file_type().is_dir() => {}
+            Ok(_) => bail!(
+                "generated output directory {} must be a directory",
+                current.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&current)
+                    .with_context(|| format!("failed to create {}", current.display()))?;
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to inspect {}", current.display()));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn remove_empty_managed_parent_directories(plan: &OutputPlan, relative: &Path) -> Result<()> {
+    let mut parent = relative.parent();
+    while let Some(path) = parent {
+        if path.components().count() <= 1 {
+            break;
+        }
+        let directory = plan.root.join(path);
+        match fs::remove_dir(&directory) {
+            Ok(()) => parent = path.parent(),
+            Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => parent = path.parent(),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to remove {}", directory.display()));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn generated_output_manifest_bytes(plan: &OutputPlan) -> Result<Vec<u8>> {
+    canonical_json(&GeneratedOutputManifest {
+        format: GENERATED_OUTPUT_FORMAT.to_owned(),
+        output: plan.kind.as_str().to_owned(),
+        paths: plan
+            .desired
+            .keys()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect(),
+    })
+}
+
+fn ensure_real_directory(path: &Path, description: &str) -> Result<()> {
+    match fs::symlink_metadata(path)
+        .with_context(|| format!("failed to inspect {}", path.display()))?
+        .file_type()
+    {
+        file_type if file_type.is_symlink() => {
+            bail!("{description} {} must not be a symlink", path.display());
+        }
+        file_type if file_type.is_dir() => Ok(()),
+        _ => bail!("{description} {} must be a directory", path.display()),
+    }
+}
+
+fn ensure_real_or_missing_directory(path: &Path, description: &str) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            bail!("{description} {} must not be a symlink", path.display());
+        }
+        Ok(metadata) if metadata.file_type().is_dir() => Ok(()),
+        Ok(_) => bail!("{description} {} must be a directory", path.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("failed to inspect {}", path.display())),
+    }
 }
 
 fn bundle(
@@ -491,11 +902,12 @@ fn signature_path(bundle: &Path) -> PathBuf {
     PathBuf::from(format!("{}.sig", bundle.display()))
 }
 
-fn parse_target(value: &str) -> Result<Harness> {
+fn parse_target_selection(value: &str) -> Result<TargetSelection> {
     match value {
-        "claude" => Ok(Harness::Claude),
-        "codex" => Ok(Harness::Codex),
-        _ => bail!("target must be claude or codex"),
+        "all" => Ok(TargetSelection::All),
+        "claude" => Ok(TargetSelection::One(Harness::Claude)),
+        "codex" => Ok(TargetSelection::One(Harness::Codex)),
+        _ => bail!("target must be claude, codex, or all"),
     }
 }
 
@@ -544,17 +956,245 @@ Review the change.
     }
 
     #[test]
-    fn transform_refuses_to_mix_with_stale_output() {
+    fn transform_writes_agents_and_skills_to_harness_discovery_directories() {
         let source = tempdir().unwrap();
-        fs::write(source.path().join("thor.yaml"), MANIFEST).unwrap();
-        fs::create_dir(source.path().join("agents")).unwrap();
-        fs::write(source.path().join("agents/reviewer.md"), AGENT).unwrap();
-        let output = source.path().join("generated");
+        write_source(source.path());
+        let root = source.path().join("project");
+        fs::create_dir(&root).unwrap();
 
-        transform(source.path(), Harness::Codex, &output).unwrap();
-        assert!(output.join("agents/reviewer.toml").is_file());
-        let error = transform(source.path(), Harness::Codex, &output).unwrap_err();
-        assert!(error.to_string().contains("must be empty"));
+        transform(source.path(), TargetSelection::All, &root, false).unwrap();
+
+        assert!(root.join(".claude/agents/reviewer.md").is_file());
+        assert!(root.join(".codex/agents/reviewer.toml").is_file());
+        assert!(
+            root.join(".claude/skills/review-checklist/SKILL.md")
+                .is_file()
+        );
+        assert!(
+            root.join(".agents/skills/review-checklist/references/severity.md")
+                .is_file()
+        );
+        assert_eq!(
+            fs::read(root.join(".claude/skills/review-checklist/SKILL.md")).unwrap(),
+            fs::read(source.path().join("skills/review-checklist/SKILL.md")).unwrap()
+        );
+        assert_eq!(
+            fs::read(root.join(".agents/skills/review-checklist/references/severity.md"),).unwrap(),
+            fs::read(
+                source
+                    .path()
+                    .join("skills/review-checklist/references/severity.md"),
+            )
+            .unwrap()
+        );
+        assert!(!root.join(".codex/skills").exists());
+    }
+
+    #[test]
+    fn transform_refreshes_owned_files_and_preserves_unrelated_harness_files() {
+        let source = tempdir().unwrap();
+        write_source(source.path());
+        let root = source.path().join("project");
+        fs::create_dir(&root).unwrap();
+
+        transform(source.path(), TargetSelection::All, &root, false).unwrap();
+        let local_agent = root.join(".claude/agents/local.md");
+        let local_skill = root.join(".agents/skills/local/SKILL.md");
+        fs::write(&local_agent, "local Claude agent\n").unwrap();
+        fs::create_dir_all(local_skill.parent().unwrap()).unwrap();
+        fs::write(&local_skill, "local Codex skill\n").unwrap();
+        fs::write(
+            source.path().join("agents/reviewer.md"),
+            AGENT.replace("Review the change.", "Review the refreshed change."),
+        )
+        .unwrap();
+
+        transform(source.path(), TargetSelection::All, &root, false).unwrap();
+
+        assert!(
+            fs::read_to_string(root.join(".claude/agents/reviewer.md"))
+                .unwrap()
+                .contains("Review the refreshed change.")
+        );
+        assert_eq!(
+            fs::read_to_string(local_agent).unwrap(),
+            "local Claude agent\n"
+        );
+        assert_eq!(
+            fs::read_to_string(local_skill).unwrap(),
+            "local Codex skill\n"
+        );
+    }
+
+    #[test]
+    fn transform_refuses_to_adopt_an_unmanaged_generated_path_with_matching_contents() {
+        let source = tempdir().unwrap();
+        write_source(source.path());
+        let root = source.path().join("project");
+        let agent = root.join(".claude/agents/reviewer.md");
+        fs::create_dir_all(agent.parent().unwrap()).unwrap();
+        let pack = SourcePack::load(source.path()).unwrap();
+        let expected = render_claude(&pack.resolve(&pack.agents[0], Harness::Claude).unwrap());
+        fs::write(&agent, &expected).unwrap();
+
+        let error = transform(
+            source.path(),
+            TargetSelection::One(Harness::Claude),
+            &root,
+            false,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unmanaged harness definition"));
+        assert_eq!(fs::read_to_string(agent).unwrap(), expected);
+        assert!(!root.join(".claude/.thor-generated.json").exists());
+    }
+
+    #[test]
+    fn transform_removes_stale_owned_agents_and_skills() {
+        let source = tempdir().unwrap();
+        write_source(source.path());
+        write_obsolete_source(source.path());
+        let root = source.path().join("project");
+        fs::create_dir(&root).unwrap();
+
+        transform(source.path(), TargetSelection::All, &root, false).unwrap();
+        fs::remove_file(source.path().join("agents/obsolete.md")).unwrap();
+        fs::remove_dir_all(source.path().join("skills/obsolete")).unwrap();
+
+        transform(source.path(), TargetSelection::All, &root, false).unwrap();
+
+        for path in [
+            ".claude/agents/obsolete.md",
+            ".codex/agents/obsolete.toml",
+            ".claude/skills/obsolete/SKILL.md",
+            ".agents/skills/obsolete/SKILL.md",
+        ] {
+            assert!(!root.join(path).exists(), "{path} should be removed");
+        }
+    }
+
+    #[test]
+    fn transform_check_reports_source_drift_without_modifying_the_candidate_tree() {
+        let source = tempdir().unwrap();
+        write_source(source.path());
+        let root = source.path().join("project");
+        fs::create_dir(&root).unwrap();
+
+        transform(source.path(), TargetSelection::All, &root, false).unwrap();
+        transform(source.path(), TargetSelection::All, &root, true).unwrap();
+        let generated = root.join(".claude/agents/reviewer.md");
+        let original = fs::read(&generated).unwrap();
+        fs::write(
+            source.path().join("agents/reviewer.md"),
+            AGENT.replace("Review the change.", "Review the changed source."),
+        )
+        .unwrap();
+
+        let error = transform(source.path(), TargetSelection::All, &root, true).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("generated harness definitions are stale")
+        );
+        assert_eq!(fs::read(&generated).unwrap(), original);
+        transform(source.path(), TargetSelection::All, &root, false).unwrap();
+        transform(source.path(), TargetSelection::All, &root, true).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transform_refuses_a_symlinked_harness_directory() {
+        use std::os::unix::fs::symlink;
+
+        let source = tempdir().unwrap();
+        write_source(source.path());
+        let root = source.path().join("project");
+        let external = tempdir().unwrap();
+        fs::create_dir(&root).unwrap();
+        symlink(external.path(), root.join(".claude")).unwrap();
+
+        let error = transform(
+            source.path(),
+            TargetSelection::One(Harness::Claude),
+            &root,
+            false,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("must not be a symlink"));
+        assert!(!external.path().join("agents/reviewer.md").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transform_refuses_a_symlinked_generated_output_file() {
+        use std::os::unix::fs::symlink;
+
+        let source = tempdir().unwrap();
+        write_source(source.path());
+        let root = source.path().join("project");
+        fs::create_dir(&root).unwrap();
+        transform(
+            source.path(),
+            TargetSelection::One(Harness::Claude),
+            &root,
+            false,
+        )
+        .unwrap();
+        let generated = root.join(".claude/agents/reviewer.md");
+        let external = source.path().join("external.md");
+        fs::write(&external, "external\n").unwrap();
+        fs::remove_file(&generated).unwrap();
+        symlink(&external, &generated).unwrap();
+
+        let error = transform(
+            source.path(),
+            TargetSelection::One(Harness::Claude),
+            &root,
+            false,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("must not be a symlink"));
+        assert_eq!(fs::read_to_string(external).unwrap(), "external\n");
+    }
+
+    #[test]
+    fn transform_all_uses_only_targets_selected_by_the_pack() {
+        let source = tempdir().unwrap();
+        write_source(source.path());
+        fs::write(
+            source.path().join("thor.yaml"),
+            MANIFEST.replace("targets: [claude, codex]", "targets: [claude]"),
+        )
+        .unwrap();
+        let root = source.path().join("project");
+        fs::create_dir(&root).unwrap();
+
+        transform(source.path(), TargetSelection::All, &root, false).unwrap();
+
+        assert!(root.join(".claude/agents/reviewer.md").is_file());
+        assert!(!root.join(".codex").exists());
+        assert!(!root.join(".agents").exists());
+    }
+
+    #[test]
+    fn transform_cli_defaults_to_all_targets_in_the_current_project() {
+        let cli = Cli::try_parse_from(["thor-build", "transform"]).unwrap();
+        let Command::Transform {
+            source,
+            target,
+            root,
+            check,
+        } = cli.command
+        else {
+            panic!("expected transform command");
+        };
+        assert_eq!(source, PathBuf::from(DEFAULT_SOURCE_DIRECTORY));
+        assert_eq!(target, "all");
+        assert_eq!(root, PathBuf::from(DEFAULT_PROJECT_ROOT));
+        assert!(!check);
     }
 
     #[test]
@@ -591,17 +1231,7 @@ Review the change.
     #[test]
     fn bundle_is_deterministic_and_signed() {
         let source = tempdir().unwrap();
-        fs::write(source.path().join("thor.yaml"), MANIFEST).unwrap();
-        fs::create_dir(source.path().join("agents")).unwrap();
-        fs::write(source.path().join("agents/reviewer.md"), AGENT).unwrap();
-        let skill = source.path().join("skills/review-checklist");
-        fs::create_dir_all(skill.join("references")).unwrap();
-        fs::write(
-            skill.join("SKILL.md"),
-            "---\nname: review-checklist\ndescription: A checklist.\n---\n\nCheck changes.\n",
-        )
-        .unwrap();
-        fs::write(skill.join("references/severity.md"), "# Severity\n").unwrap();
+        write_source(source.path());
         let key_path = source.path().join("key.txt");
         fs::write(&key_path, hex::encode([7u8; 32])).unwrap();
         let metadata = BundleMetadata {
@@ -664,5 +1294,34 @@ Review the change.
             codex_compatibility: Some(">=1.0.0".to_owned()),
         };
         assert!(compatibility_for(&Harness::ALL, &invalid_range).is_err());
+    }
+
+    fn write_source(source: &Path) {
+        fs::write(source.join("thor.yaml"), MANIFEST).unwrap();
+        fs::create_dir(source.join("agents")).unwrap();
+        fs::write(source.join("agents/reviewer.md"), AGENT).unwrap();
+        let skill = source.join("skills/review-checklist");
+        fs::create_dir_all(skill.join("references")).unwrap();
+        fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: review-checklist\ndescription: A checklist.\n---\n\nCheck changes.\n",
+        )
+        .unwrap();
+        fs::write(skill.join("references/severity.md"), "# Severity\n").unwrap();
+    }
+
+    fn write_obsolete_source(source: &Path) {
+        fs::write(
+            source.join("agents/obsolete.md"),
+            AGENT.replace("id: reviewer", "id: obsolete"),
+        )
+        .unwrap();
+        let skill = source.join("skills/obsolete");
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: obsolete\ndescription: An obsolete skill.\n---\n\nRemove me.\n",
+        )
+        .unwrap();
     }
 }
