@@ -432,6 +432,14 @@ Build the smallest vertical slices in this order:
 
 No lifecycle command should write a harness path until step 4's full verification path and step 5's recovery path are tested.
 
+## Best-effort worker progress
+
+Thor's Slicer and systemic-assurance prompts use a concise, best-effort `PROGRESS` update for work lasting roughly three minutes or more. The update is a 2x2: `CHANGE`, `CURRENT`, `ATTENTION`, and `NEXT`, with a structured health indicator and a short free-form phase such as `Architecture — deciding tenancy boundaries` or `Verification — exercising concurrent requests`.
+
+The phase is deliberately descriptive rather than an enum. Recommended vocabulary is discovery, architecture, design, implementation, verification, lens review, remediation, systemic assurance, integration, and release readiness; it is not a Thor workflow state machine. `health` remains constrained to `on-track`, `waiting`, `blocked`, or `checkpoint-delayed`.
+
+Progress is non-terminal operational communication. It neither creates durable repository state nor changes candidate certification, and it must never require an agent to interrupt a running command, write, transaction, migration, deployment, or external side effect. When a target runtime cannot deliver a non-terminal message, the worker supplies the same concise status when its owner requests it.
+
 ## Validation and acceptance criteria
 
 - Each source agent is exactly one `assets/agents/<id>.md` file; no agent may appear in `assets/thor.yaml`, and its filename must equal its `id`.

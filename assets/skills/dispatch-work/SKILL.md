@@ -24,7 +24,7 @@ For every slice provide:
 - dependencies on other slices;
 - validation and acceptance criteria;
 - expected integration point or base revision; and
-- instruction to use `$deliver-slice` and return only a terminal report.
+- instruction to use `$deliver-slice`, send best-effort non-terminal progress updates for long-running work, and return one terminal report.
 
 ## Delegate ownership
 
@@ -33,6 +33,12 @@ Spawn `slice_owner` for each ready slice. The Slice Owner owns implementation, v
 Run independent slices concurrently only when their write scopes do not overlap. Use separate worktrees when concurrent owners would otherwise share a checkout. Sequence dependent or overlapping slices.
 
 Treat integration and finalization as another owned slice. Assign an Integration Owner through `slice_owner`; do not absorb its implementation or review loop into the Work Dispatcher.
+
+## Observe progress without taking ownership
+
+For work expected to run for roughly three minutes or more, ask the Slice Owner for concise progress updates at safe boundaries. Treat `PROGRESS` updates as informational rather than durable workflow state. Forward only material `ATTENTION` items upward; routine implementation, review, and repair activity remains with the Slice Owner.
+
+Do not ask a worker to interrupt a running command, write, transaction, migration, deployment, or external side effect merely to report status. If a runtime cannot deliver a non-terminal message, request status when appropriate without cancelling the worker.
 
 ## Process only terminal reports
 
@@ -44,6 +50,8 @@ Accept four outcomes:
 - `FAILED`: the owner cannot produce a defensible candidate or the repair loop is not converging.
 
 Resolve decisions and blockers, then return the slice to an owner with an amended delivery contract. Do not request raw review transcripts unless investigating a disputed terminal report.
+
+Progress updates do not create a terminal state, change candidate certification, or substitute for a terminal report.
 
 ## Preserve long-running state simply
 

@@ -20,6 +20,32 @@ Require all of the following:
 
 If a prerequisite is absent, inconsistent, or refers to a different candidate, return `NOT READY` with only the missing or conflicting inputs. Do not require historical findings, disposition ledgers, review files, or administrative closure records.
 
+Progress updates
+
+For review work lasting roughly three minutes or more, send the Slice Owner a concise non-terminal update at the next safe boundary. Continue the review after reporting.
+
+```text
+PROGRESS — systemic assurance — <sequence>
+phase: <short free-form phase and, when useful, its object>
+health: on-track | waiting | blocked | checkpoint-delayed
+candidate: <commit, pull-request head, or candidate identity>
+
+CHANGE
+- Evidence reviewed or analysis completed since the previous update.
+
+CURRENT
+- The precise assurance activity in progress and, if applicable, its safe completion boundary.
+
+ATTENTION
+- [owner: <name>] Missing evidence, decision, blocker, or material risk.
+- Otherwise: `No Slice Owner action required.`
+
+NEXT
+- The next verifiable review outcome or decision point.
+```
+
+An interim update is not a systemic decision. Do not state, imply, or pre-commit to `APPROVE`, accepted risk, or a blocking finding until the complete candidate has been assessed. Do not interrupt a running command or external operation merely to report progress. If this runtime cannot deliver a non-terminal message, provide the same update when the Slice Owner requests status.
+
 System-level focus
 Report only issues involving at least one of:
 - incompatibility among multiple first-tier conclusions, controls, or lifecycle stages that remain acceptable when each is considered under its owning lens;
