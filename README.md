@@ -17,6 +17,8 @@ The normative design and source-format contract are in
   project discovery directories for dogfooding.
 - Standard `assets/skills/<name>/SKILL.md` directories copied unchanged to each
   target's documented skill location.
+- Optional static files below `assets/.claude/` and `assets/.codex/`, copied
+  unchanged below the matching harness root.
 - Deterministic, signed agent-pack bundles and a native Rust `thor` lifecycle
   binary for verified install, update, status, recovery, and uninstall.
 
@@ -43,6 +45,8 @@ my-pack/
     ├── thor.yaml
     ├── agents/
     │   └── pr-reviewer.md
+    ├── .codex/
+    │   └── config.toml
     └── skills/
         └── review-checklist/
             └── SKILL.md
@@ -83,13 +87,15 @@ cargo run --locked -p thor-build -- transform
 ```
 
 This writes Claude agents and skills to `.claude/agents/` and `.claude/skills/`,
-and Codex agents and skills to `.codex/agents/` and `.agents/skills/`. Git tracks
-these generated definitions as reviewable dogfood snapshots; `assets/` remains
-the only authoring source. Each harness root contains a generated
+Codex agents and skills to `.codex/agents/` and `.agents/skills/`, and copies
+static files below `assets/.claude/` or `assets/.codex/` to the matching harness
+root. Git tracks these generated definitions as reviewable dogfood snapshots;
+`assets/` remains the only authoring source. Each harness root contains a generated
 `.thor-generated.json` inventory. On later runs, the transformer refreshes
-source-derived paths and removes only paths listed in that inventory, while it
-preserves unrelated harness files. It rejects an untracked file at a path Thor
-needs to generate.
+source-derived agents and skills and removes only paths listed in that inventory.
+Static files overwrite their matching paths but are not removed automatically
+when their source file disappears. The transformer preserves unrelated harness
+files and rejects an untracked file at a generated agent or skill path.
 
 CI verifies the tracked snapshots without modifying them:
 

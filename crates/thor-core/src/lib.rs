@@ -485,6 +485,82 @@ pub fn collect_skill_payloads(skills_root: impl AsRef<Path>) -> Result<BTreeMap<
     Ok(payloads)
 }
 
+/// Validates a target-scoped static tree and returns its opaque payloads in
+/// sorted archive-path order.
+pub fn collect_static_payloads(
+    static_root: impl AsRef<Path>,
+    target: Harness,
+) -> Result<BTreeMap<String, Vec<u8>>> {
+    let static_root = static_root.as_ref();
+    if !static_root.exists() {
+        return Ok(BTreeMap::new());
+    }
+    ensure_real_directory(static_root, "static payload directory")?;
+
+    let mut payloads = BTreeMap::new();
+    let mut portable_payload_paths = BTreeMap::new();
+    for walked in WalkDir::new(static_root).follow_links(false) {
+        let walked = walked.map_err(|error| ThorError::Validation {
+            path: static_root.to_path_buf(),
+            message: format!("cannot walk static payload tree: {error}"),
+        })?;
+        if walked.path() == static_root {
+            continue;
+        }
+        let file_type = walked.file_type();
+        if file_type.is_symlink() || (!file_type.is_file() && !file_type.is_dir()) {
+            return validation(
+                walked.path(),
+                "static payload trees may contain only regular files and directories",
+            );
+        }
+        let relative = walked
+            .path()
+            .strip_prefix(static_root)
+            .expect("walk path is below static root");
+        validate_portable_skill_path(walked.path(), relative)?;
+        let first = relative
+            .components()
+            .next()
+            .and_then(|component| match component {
+                Component::Normal(component) => component.to_str(),
+                _ => None,
+            })
+            .expect("validated static path has a first component");
+        if first == "agents" || (matches!(target, Harness::Claude) && first == "skills") {
+            return validation(
+                walked.path(),
+                "static payload paths may not overlap generated agents or skills",
+            );
+        }
+        if file_type.is_file() {
+            reject_hard_link(walked.path())?;
+            let archive_path = format!(
+                "targets/{}/static/{}",
+                target.as_str(),
+                portable_path(relative)?
+            );
+            insert_portable_payload_path(&mut portable_payload_paths, &archive_path).map_err(
+                |message| ThorError::Validation {
+                    path: walked.path().to_path_buf(),
+                    message,
+                },
+            )?;
+            let bytes = fs::read(walked.path()).map_err(|source| ThorError::Read {
+                path: walked.path().to_path_buf(),
+                source,
+            })?;
+            if payloads.insert(archive_path.clone(), bytes).is_some() {
+                return validation(
+                    walked.path(),
+                    format!("duplicate static payload {archive_path}"),
+                );
+            }
+        }
+    }
+    Ok(payloads)
+}
+
 pub fn render_claude(agent: &ResolvedAgent) -> String {
     let mut frontmatter = vec![
         format!("name: {}", yaml_string(&agent.id)),
@@ -1033,6 +1109,39 @@ Review the requested change and report actionable findings only.
             b"#!/bin/sh\necho not-run\n"
         );
         assert!(payloads.contains_key("skills/review-checklist/SKILL.md"));
+    }
+
+    #[test]
+    fn collects_target_scoped_static_files_as_opaque_payloads() {
+        let directory = tempdir().unwrap();
+        let static_root = directory.path().join(".codex");
+        fs::create_dir_all(static_root.join("nested")).unwrap();
+        fs::write(
+            static_root.join("config.toml"),
+            "[agents]\nmax_concurrent_threads_per_session = 16\n",
+        )
+        .unwrap();
+        fs::write(static_root.join("nested/settings.json"), "{}\n").unwrap();
+
+        let payloads = collect_static_payloads(&static_root, Harness::Codex).unwrap();
+        assert_eq!(
+            payloads["targets/codex/static/config.toml"],
+            b"[agents]\nmax_concurrent_threads_per_session = 16\n"
+        );
+        assert_eq!(
+            payloads["targets/codex/static/nested/settings.json"],
+            b"{}\n"
+        );
+    }
+
+    #[test]
+    fn rejects_static_files_that_overlap_generated_definitions() {
+        let directory = tempdir().unwrap();
+        let agents = directory.path().join(".codex/agents");
+        fs::create_dir_all(&agents).unwrap();
+        fs::write(agents.join("reviewer.toml"), "name = \"reviewer\"\n").unwrap();
+
+        assert!(collect_static_payloads(directory.path().join(".codex"), Harness::Codex).is_err());
     }
 
     #[test]

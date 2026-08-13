@@ -694,6 +694,12 @@ fn validate_payload_path(path: &str) -> Result<()> {
         ["targets", "codex", "agents", filename] if filename.ends_with(".toml") => {
             validate_identifier(&filename[..filename.len() - 5])
         }
+        ["targets", "claude", "static", rest @ ..] if !rest.is_empty() => {
+            validate_static_payload_path(rest, true)
+        }
+        ["targets", "codex", "static", rest @ ..] if !rest.is_empty() => {
+            validate_static_payload_path(rest, false)
+        }
         ["skills", skill, rest @ ..] if !rest.is_empty() => {
             validate_identifier(skill)?;
             if rest.iter().all(|component| portable_component(component)) {
@@ -704,6 +710,16 @@ fn validate_payload_path(path: &str) -> Result<()> {
         }
         _ => bail!("bundle payload path is outside the allowed layout: {path}"),
     }
+}
+
+fn validate_static_payload_path(path: &[&str], claude: bool) -> Result<()> {
+    if !path.iter().all(|component| portable_component(component))
+        || matches!(path.first(), Some(&"agents"))
+        || (claude && matches!(path.first(), Some(&"skills")))
+    {
+        bail!("bundle contains an invalid static payload path")
+    }
+    Ok(())
 }
 
 fn validate_identifier(value: &str) -> Result<()> {
@@ -1360,10 +1376,26 @@ fn validate_destination(target: &Harness, destination: &str) -> Result<()> {
         }
         return validate_identifier(identifier);
     }
+    if destination.starts_with(expected_agents) {
+        bail!("managed agent destination must be flat");
+    }
     if let Some(skill) = destination.strip_prefix(expected_skills)
         && skill.split('/').all(portable_component)
     {
         return Ok(());
+    }
+    if destination.starts_with(expected_skills) {
+        bail!("managed skill destination is invalid");
+    }
+    let static_root = match target {
+        Harness::Claude => ".claude/",
+        Harness::Codex => ".codex/",
+    };
+    if let Some(static_path) = destination.strip_prefix(static_root) {
+        return validate_static_payload_path(
+            &static_path.split('/').collect::<Vec<_>>(),
+            matches!(target, Harness::Claude),
+        );
     }
     bail!("managed destination is outside the target layout: {destination}")
 }
@@ -1807,6 +1839,7 @@ struct PendingWrite {
     destination: String,
     bytes: Vec<u8>,
     sha256: String,
+    static_payload: bool,
 }
 
 fn installation_plan(
@@ -1822,14 +1855,18 @@ fn installation_plan(
             Harness::Codex => (".codex/agents", ".agents/skills", ".toml"),
         };
         let prefix = format!("targets/{}/agents/", target.as_str());
+        let static_prefix = format!("targets/{}/static/", target.as_str());
         for (source, bytes) in &bundle.payloads {
-            let destination = if let Some(filename) = source.strip_prefix(&prefix) {
+            let (destination, static_payload) = if let Some(filename) = source.strip_prefix(&prefix)
+            {
                 if !filename.ends_with(agent_extension) || filename.contains('/') {
                     bail!("verified bundle has malformed agent payload {source}");
                 }
-                format!("{agent_destination}/{filename}")
+                (format!("{agent_destination}/{filename}"), false)
+            } else if let Some(relative) = source.strip_prefix(&static_prefix) {
+                (format!(".{}/{relative}", target.as_str()), true)
             } else if let Some(rest) = source.strip_prefix("skills/") {
-                format!("{skill_destination}/{rest}")
+                (format!("{skill_destination}/{rest}"), false)
             } else {
                 continue;
             };
@@ -1838,6 +1875,7 @@ fn installation_plan(
                 destination: destination.clone(),
                 bytes: bytes.clone(),
                 sha256: sha256_hex(bytes),
+                static_payload,
             };
             if writes.insert(destination.clone(), write).is_some() {
                 bail!("bundle maps multiple payloads to {destination}");
@@ -1892,6 +1930,17 @@ fn apply_install(
         .unwrap_or_default();
     for write in &writes {
         let path = safe_destination(&location.root, &write.target, &write.destination)?;
+        match fs::symlink_metadata(&path) {
+            Ok(_) if write.static_payload => {
+                ensure_regular_file(&path, "static payload destination")?;
+                continue;
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("cannot inspect {}", path.display()));
+            }
+        }
         if path.exists() {
             match previous_files.get(write.destination.as_str()) {
                 Some(expected) if sha256_file(&path)? == *expected || force => {}
@@ -2777,6 +2826,74 @@ mod tests {
     }
 
     #[test]
+    fn static_payloads_replace_existing_files() {
+        let directory = tempdir().unwrap();
+        let location = InstallLocation {
+            scope: ScopeArg::Project,
+            root: directory.path().to_path_buf(),
+            state_root: directory.path().join(".thor"),
+        };
+        let destination = directory.path().join(".codex/config.toml");
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::write(&destination, "local = true\n").unwrap();
+        let payload = b"[agents]\nmax_concurrent_threads_per_session = 16\n".to_vec();
+        let bundle = verified_payload_bundle(
+            "1.2.0",
+            vec![Harness::Codex],
+            BTreeMap::from([(
+                "targets/codex/static/config.toml".to_owned(),
+                payload.clone(),
+            )]),
+        );
+
+        let (mut state, writes) =
+            installation_plan(&bundle, location.scope, &location.root, &[Harness::Codex]).unwrap();
+        let state_path = state_path(&location, &state.repository, &state.package_name);
+        apply_install(
+            &location,
+            &state_path,
+            None,
+            Some(&mut state),
+            writes,
+            &[],
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(&destination).unwrap(), payload);
+        assert_eq!(state.files[0].destination, ".codex/config.toml");
+
+        fs::write(&destination, "local = changed\n").unwrap();
+        let updated_payload = b"[agents]\nmax_concurrent_threads_per_session = 8\n".to_vec();
+        let updated_bundle = verified_payload_bundle(
+            "1.2.1",
+            vec![Harness::Codex],
+            BTreeMap::from([(
+                "targets/codex/static/config.toml".to_owned(),
+                updated_payload.clone(),
+            )]),
+        );
+        let (mut updated_state, writes) = installation_plan(
+            &updated_bundle,
+            location.scope,
+            &location.root,
+            &[Harness::Codex],
+        )
+        .unwrap();
+        apply_install(
+            &location,
+            &state_path,
+            Some(&state),
+            Some(&mut updated_state),
+            writes,
+            &[],
+            false,
+        )
+        .unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), updated_payload);
+    }
+
+    #[test]
     fn updates_one_target_removes_its_payload_and_retains_other_targets() {
         let codex =
             b"name = \"reviewer\"\ndescription = \"Review\"\ndeveloper_instructions = \"Review\"\n"
@@ -2949,6 +3066,7 @@ mod tests {
             destination: ".claude/agents/reviewer.md".to_owned(),
             sha256: sha256_hex(&agent),
             bytes: agent,
+            static_payload: false,
         }];
         assert!(reject_conflicts(&location, None, &[], &writes).is_err());
     }
@@ -2989,6 +3107,7 @@ mod tests {
             destination: ".agents/skills/research/SKILL.md".to_owned(),
             sha256: sha256_hex(&skill),
             bytes: skill,
+            static_payload: false,
         }];
         assert!(reject_conflicts(&location, None, &[], &writes).is_err());
     }

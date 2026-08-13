@@ -93,10 +93,13 @@ The standard's optional `allowed-tools` field has differing host support. Treat 
 
 ## Canonical meta-definition
 
-Thor has two source formats:
+Thor has these source inputs:
 
 - `assets/thor.yaml` is the versioned package manifest. It contains package metadata plus global logical-model mappings. Each target entry resolves both a harness model and a Codex-aligned effort.
 - `assets/agents/<id>.md` is the complete definition of one subagent. Its YAML frontmatter is the agent configuration; its Markdown body is the agent instruction text.
+- `assets/.claude/**` and `assets/.codex/**` are optional target-scoped static files. Thor copies their opaque bytes to the identical relative path below the matching harness root. Static files must not overlap generated `agents/` paths or Claude `skills/` paths.
+
+Dogfood transformation overwrites each static source path but does not remove a static output after its source file disappears. Release installation tracks static payloads in the normal file inventory, so an update that removes a static payload removes its previously installed file.
 
 The Thor tool repository's `schema/thor-v1.schema.json` is the sole normative schema source. It contains separate definitions for the package manifest and agent frontmatter and is embedded in the versioned `thor-build` binary. The Rust structures use `serde(deny_unknown_fields)` and must agree with that schema. CI validates frontmatter against the schema; the Markdown parser separately requires a non-empty UTF-8 body. YAML/Markdown remain author-friendly while the schema gives a language-neutral contract and clear validation failures.
 
@@ -332,8 +335,8 @@ Compatibility is evaluated separately for each selected target. If a selected ha
 
 | Operation | Required behavior |
 |---|---|
-| `init` | Resolve the requested tag/release, verify the signature, manifest, compatibility, ZIP safety, and every digest before any destination write. Refuse unmanaged-file conflicts and paths owned by another pack. Then execute a journaled transaction and write its state record only after commit. |
-| `update` | Read the selected pack's state, resolve `--ref` or latest compatible release, then perform the same full verification. Refuse to replace a file whose digest differs from its previous installed digest unless `--force` is explicit. Delete a payload removed by the new release only when its previous digest still matches. |
+| `init` | Resolve the requested tag/release, verify the signature, manifest, compatibility, ZIP safety, and every digest before any destination write. Refuse unmanaged generated-file conflicts and paths owned by another pack. Static payloads replace an existing regular file at the same path. Then execute a journaled transaction and write its state record only after commit. |
+| `update` | Read the selected pack's state, resolve `--ref` or latest compatible release, then perform the same full verification. Refuse to replace a generated file whose digest differs from its previous installed digest unless `--force` is explicit. Static payloads replace an existing regular file at the same path. Delete a payload removed by the new release only when its previous digest still matches. |
 | `uninstall` | Read the selected pack state and delete only state-listed files whose digest still equals the installed digest. Leave modified files in place and fail with their paths; `--force` removes them. Remove only empty directories that Thor created. Never delete a shared `.claude`, `.codex`, or `.agents` directory. |
 | `status` | List installed packs, pinned release, selected targets, signing-key fingerprint, managed paths, and detected drift without changing files. |
 

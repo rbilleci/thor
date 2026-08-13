@@ -12,7 +12,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
 use thor_core::{
     ArtifactManifest, ArtifactPackage, Harness, PayloadDigest, SignatureEnvelope, SourcePack,
-    collect_skill_payloads, render_claude, render_codex,
+    collect_skill_payloads, collect_static_payloads, render_claude, render_codex,
 };
 use zip::{CompressionMethod, ZipWriter, write::FileOptions};
 
@@ -105,6 +105,9 @@ fn main() -> Result<()> {
         Command::Validate { source } => {
             let pack = SourcePack::load(&source)
                 .with_context(|| format!("invalid source {}", source.display()))?;
+            for target in Harness::ALL {
+                collect_static_payloads(source.join(format!(".{}", target.as_str())), target)?;
+            }
             println!(
                 "validated {} {} with {} agent(s)",
                 pack.manifest.metadata.name,
@@ -326,8 +329,12 @@ fn transform(source: &Path, selection: TargetSelection, root: &Path, check: bool
     for plan in &mut plans {
         prepare_output_plan(plan)?;
     }
+    let mut static_stale = false;
+    for target in &targets {
+        static_stale |= static_output_is_stale(root, source, target)?;
+    }
     if check {
-        let stale = plans.iter().any(output_plan_is_stale);
+        let stale = static_stale || plans.iter().any(output_plan_is_stale);
         if stale {
             bail!(
                 "generated harness definitions are stale; run `thor-build transform` to refresh them"
@@ -341,12 +348,126 @@ fn transform(source: &Path, selection: TargetSelection, root: &Path, check: bool
         apply_output_plan(plan)?;
     }
     for target in &targets {
+        apply_static_output(root, source, target)?;
+    }
+    for target in &targets {
         println!(
             "generated {} agent(s) and {} skill file(s) for {}",
             pack.agents.len(),
             skill_payloads.len(),
             target.as_str()
         );
+    }
+    Ok(())
+}
+
+fn static_output_is_stale(root: &Path, source: &Path, target: &Harness) -> Result<bool> {
+    let output_root = root.join(format!(".{}", target.as_str()));
+    ensure_real_or_missing_directory(&output_root, "harness directory")?;
+    for (relative, expected) in static_output_files(source, target)? {
+        ensure_static_output_path_is_safe(&output_root, &relative)?;
+        match fs::read(output_root.join(relative)) {
+            Ok(actual) if actual == expected => {}
+            _ => return Ok(true),
+        }
+    }
+    Ok(false)
+}
+
+fn apply_static_output(root: &Path, source: &Path, target: &Harness) -> Result<()> {
+    let output_root = root.join(format!(".{}", target.as_str()));
+    ensure_real_or_missing_directory(&output_root, "harness directory")?;
+    fs::create_dir_all(&output_root)
+        .with_context(|| format!("failed to create {}", output_root.display()))?;
+    for (relative, contents) in static_output_files(source, target)? {
+        ensure_static_output_path_is_safe(&output_root, &relative)?;
+        create_static_parent_directories(&output_root, &relative)?;
+        fs::write(output_root.join(&relative), contents)
+            .with_context(|| format!("failed to write {}", output_root.join(relative).display()))?;
+    }
+    Ok(())
+}
+
+fn static_output_files(source: &Path, target: &Harness) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
+    let prefix = format!("targets/{}/static/", target.as_str());
+    collect_static_payloads(source.join(format!(".{}", target.as_str())), target.clone())?
+        .into_iter()
+        .map(|(archive_path, bytes)| {
+            let relative = archive_path
+                .strip_prefix(&prefix)
+                .expect("static payload uses its target archive prefix");
+            Ok((PathBuf::from(relative), bytes))
+        })
+        .collect()
+}
+
+fn ensure_static_output_path_is_safe(root: &Path, relative: &Path) -> Result<()> {
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        bail!("static output path {} is invalid", relative.display());
+    }
+    let mut current = root.to_path_buf();
+    for (index, component) in relative.components().enumerate() {
+        let Component::Normal(component) = component else {
+            unreachable!("validated static output path has normal components")
+        };
+        current.push(component);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                bail!(
+                    "static output path {} must not be a symlink",
+                    current.display()
+                );
+            }
+            Ok(metadata) if index + 1 < relative.components().count() && !metadata.is_dir() => {
+                bail!(
+                    "static output parent {} must be a directory",
+                    current.display()
+                );
+            }
+            Ok(metadata) if index + 1 == relative.components().count() && !metadata.is_file() => {
+                bail!(
+                    "static output path {} must be a regular file",
+                    current.display()
+                );
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to inspect {}", current.display()));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn create_static_parent_directories(root: &Path, relative: &Path) -> Result<()> {
+    let parent = relative.parent().expect("static file has a parent");
+    let mut current = root.to_path_buf();
+    for component in parent.components() {
+        let Component::Normal(component) = component else {
+            unreachable!("validated static output path has normal components")
+        };
+        current.push(component);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                bail!(
+                    "static output parent {} must be a real directory",
+                    current.display()
+                );
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => fs::create_dir(&current)
+                .with_context(|| format!("failed to create {}", current.display()))?,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to inspect {}", current.display()));
+            }
+        }
     }
     Ok(())
 }
@@ -712,6 +833,13 @@ fn bundle(
     let mut targets = pack.manifest.spec.targets.clone();
     targets.sort();
     for target in &targets {
+        for (path, bytes) in
+            collect_static_payloads(source.join(format!(".{}", target.as_str())), target.clone())?
+        {
+            if payloads.insert(path.clone(), bytes).is_some() {
+                bail!("duplicate bundle payload {path}");
+            }
+        }
         for agent in &pack.agents {
             let resolved = pack.resolve(agent, target.clone())?;
             let (path, content) = match target {
@@ -991,6 +1119,50 @@ Review the change.
     }
 
     #[test]
+    fn transform_copies_and_replaces_target_scoped_static_files() {
+        let source = tempdir().unwrap();
+        write_source(source.path());
+        fs::create_dir_all(source.path().join(".codex")).unwrap();
+        fs::create_dir_all(source.path().join(".claude")).unwrap();
+        fs::write(
+            source.path().join(".codex/config.toml"),
+            "[agents]\nmax_concurrent_threads_per_session = 16\n",
+        )
+        .unwrap();
+        fs::write(
+            source.path().join(".claude/settings.json"),
+            "{\"enabled\":true}\n",
+        )
+        .unwrap();
+        let root = source.path().join("project");
+        fs::create_dir_all(root.join(".codex")).unwrap();
+        fs::write(root.join(".codex/config.toml"), "local = true\n").unwrap();
+
+        transform(source.path(), TargetSelection::All, &root, false).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(root.join(".codex/config.toml")).unwrap(),
+            "[agents]\nmax_concurrent_threads_per_session = 16\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join(".claude/settings.json")).unwrap(),
+            "{\"enabled\":true}\n"
+        );
+
+        fs::write(
+            source.path().join(".codex/config.toml"),
+            "[agents]\nmax_concurrent_threads_per_session = 8\n",
+        )
+        .unwrap();
+        assert!(transform(source.path(), TargetSelection::All, &root, true).is_err());
+        transform(source.path(), TargetSelection::All, &root, false).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join(".codex/config.toml")).unwrap(),
+            "[agents]\nmax_concurrent_threads_per_session = 8\n"
+        );
+    }
+
+    #[test]
     fn transform_refreshes_owned_files_and_preserves_unrelated_harness_files() {
         let source = tempdir().unwrap();
         write_source(source.path());
@@ -1232,6 +1404,12 @@ Review the change.
     fn bundle_is_deterministic_and_signed() {
         let source = tempdir().unwrap();
         write_source(source.path());
+        fs::create_dir_all(source.path().join(".codex")).unwrap();
+        fs::write(
+            source.path().join(".codex/config.toml"),
+            "[agents]\nmax_concurrent_threads_per_session = 16\n",
+        )
+        .unwrap();
         let key_path = source.path().join("key.txt");
         fs::write(&key_path, hex::encode([7u8; 32])).unwrap();
         let metadata = BundleMetadata {
@@ -1272,6 +1450,11 @@ Review the change.
             manifest
                 .payloads
                 .contains_key("skills/review-checklist/references/severity.md")
+        );
+        assert!(
+            manifest
+                .payloads
+                .contains_key("targets/codex/static/config.toml")
         );
     }
 
