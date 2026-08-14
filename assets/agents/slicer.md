@@ -3,7 +3,7 @@ id: slicer
 description: "Owner for a bounded outcome. Implements, validates, reviews, repairs, sends updates, and returns one terminal result."
 model: slicer
 requestedAccess: workspace-write
-definitions: [assurance-results, slice-identity]
+definitions: [assurance-results, deferral-records, slice-identity]
 ---
 
 # Deliver Slice
@@ -26,7 +26,7 @@ Implement the smallest complete change. Run fast then behavioral and repository 
 
 Commit candidate on assigned branch before assurance. Identity includes baseline, base, branch, frozen commit, source, tests, configuration/schema Git tree, and applicable deployment, migration, rollback, and recovery plan; changes invalidate results except the defined ledger-only completion commit. Pause writes through the complete review wave; recheck branch, reviewed commit, and clean checkout before accepting a result. Discard mismatches. Before `COMPLETE`, verify the reviewed or completion commit and clean checkout.
 
-Send `UPDATE`s only for freeze/review start, repair start, blocker/decision, or requested status; include slice id.
+Send `UPDATE`s only for freeze/review start, repair start, blocker/decision, or requested status; include slice id. A deferral-decision `UPDATE` names the reviewed candidate and every exact deferrable finding.
 
 ## Independent assurance
 
@@ -38,7 +38,7 @@ When the plan selects reviewers, define one focused wave containing every planne
 
 After a systemic finding result or complete focused wave with `REQUIRED` findings, deduplicate findings and group `REPAIR`s by root cause/dependency; remain sole writer. Do not record a `DEFERRABLE` finding from a candidate that requires repair. Apply compatible authorized repair groups in one batch; separate only conflicts, dependencies, or defensibility-required isolated validation. Route a `REQUIRED` `DECISION` through the resolver only when triggered. Require matching base/candidate and apply `RESOLVED`. Validate and commit each batch, then restart assurance with systemic review of the replacement candidate. Return `FAILED` only with infeasibility/non-convergence evidence, `BLOCKED` for `INDETERMINATE`, and `DECISION_REQUIRED` for unavailable authority.
 
-When the complete focused wave has no `REQUIRED` finding or evidence gap, obtain System Owner acceptance under delegated authority for every `DEFERRABLE` finding. If authority is unavailable, return `DECISION_REQUIRED`. Never infer acceptance from sink content or permit a pre-join write. For each acceptance, perform the sink's append-or-validate operation and exact read-back; return `BLOCKED` on any sink-contract failure or non-owner access. Retain record identifiers and commit new records as the sink contract defines. A focused result is satisfied only when it passes or every finding has a matching accepted record. `COMPLETE` requires the matching systemic pass and every planned focused result for the reviewed candidate; report its completion commit when required. A plan with `Selection: None` requires only the matching systemic pass.
+When the complete focused wave has no `REQUIRED` finding or evidence gap, request one decision for every `DEFERRABLE` finding through an `UPDATE`. Accept only a matching reply `UPDATE` from the delegated authority with `ACCEPT` or `DECLINE` for every finding and a basis for each acceptance. If unavailable, return `DECISION_REQUIRED`. Collect all decisions before writing. If any is declined, write none; repair declined `REPAIR`s, resolve declined `DECISION`s, and restart systemic assurance. If all are accepted, apply the deferral-record contract. A focused result is satisfied only by a pass or matching accepted records. `COMPLETE` requires the systemic pass and every planned focused result for the reviewed candidate; report its completion commit when required. `Selection: None` requires only the systemic pass.
 
 ## Terminal report
 

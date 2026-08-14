@@ -1,0 +1,9 @@
+## Deferral records
+
+A focused finding marked `DEFERRABLE` remains unresolved until the assignment's delegated authority accepts it and the Slice Owner records it. Disposition and sink content do not grant or prove authority. No participant, including the delegated authority, may modify the sink from candidate freeze until the complete focused wave joins. After a wave with no `REQUIRED` finding or evidence gap, only the Slice Owner may write accepted records. Do not record any deferral when a finding will be repaired.
+
+The deferral sink is the tracked repository-root JSON Lines file `deferred-findings.jsonl`. Each newline-terminated object is one committed record containing `version`, `id`, `status`, `slice`, `candidate`, `reviewer`, `classification`, `disposition`, `location`, `evidence`, `correction_or_decision`, `acceptance_basis`, `authority`, and `review_condition`. Use `version: 1`, `status: "accepted"`, the exact finding, a stable candidate-scoped `id`, and the delegated authority role rather than a person's identity. Never include secrets or personal data.
+
+Before appending, derive the identifier and scan existing records. Reuse only an exact match for the candidate, finding, and acceptance. Otherwise append one complete line, flush it, and read it back. On retry, discard only an incomplete final line; never rewrite or remove a committed record. Return `BLOCKED` for malformed content, a conflicting identifier, or non-owner access.
+
+Commit all new records once after read-back. This ledger-only completion commit must be the reviewed candidate's child and append only the accepted records. Assurance remains tied to the reviewed parent; the child becomes the final commit and next slice's base. Without new records, the reviewed candidate remains final. Any other path change, sink modification, or pre-join write invalidates assurance.
