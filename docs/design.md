@@ -412,6 +412,16 @@ paths, removes only inventory-listed paths, and preserves unrelated harness
 files. It rejects a file at a required path when no inventory owns that path,
 and it rejects symbolic links in a harness root, generated path, or
 generated-path parent.
+
+Before changing generated paths, `transform` atomically publishes a transition
+inventory containing both the previously owned paths and the desired paths. It
+writes and removes files while that inventory remains authoritative, then
+atomically replaces it with the desired inventory. If the process stops during
+either inventory replacement or a file mutation, rerunning `transform` with the
+same source completes the change, while rerunning it after reverting the source
+removes the interrupted addition. Both paths preserve files outside the
+transition inventory.
+
 `transform --check` compares the source-derived tree with the tracked snapshots
 without writing files, so CI rejects stale generated definitions. The workflow
 does not retain an intermediate `dist/` tree.

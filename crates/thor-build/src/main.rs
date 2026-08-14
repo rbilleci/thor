@@ -1,8 +1,9 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::{Cursor, Write},
     path::{Component, Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -704,35 +705,118 @@ fn output_plan_is_stale(plan: &OutputPlan) -> bool {
 }
 
 fn apply_output_plan(plan: &OutputPlan) -> Result<()> {
+    apply_output_plan_with_checkpoint(plan, |_, _| Ok(()))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputPlanCheckpoint {
+    TransitionManifestStaged,
+    TransitionManifestInstalled,
+    DesiredFileWritten,
+    StaleFileRemoved,
+    FinalManifestStaged,
+    FinalManifestInstalled,
+}
+
+fn apply_output_plan_with_checkpoint(
+    plan: &OutputPlan,
+    mut checkpoint: impl FnMut(OutputPlanCheckpoint, Option<&Path>) -> Result<()>,
+) -> Result<()> {
     fs::create_dir_all(&plan.root)
         .with_context(|| format!("failed to create {}", plan.root.display()))?;
+    let desired_paths = plan.desired.keys().cloned().collect::<BTreeSet<_>>();
+    let transition_paths = plan
+        .previous
+        .union(&desired_paths)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    write_generated_output_manifest(
+        plan,
+        &transition_paths,
+        OutputPlanCheckpoint::TransitionManifestStaged,
+        OutputPlanCheckpoint::TransitionManifestInstalled,
+        &mut checkpoint,
+    )?;
     for (path, contents) in &plan.desired {
         create_managed_parent_directories(plan, path)?;
         if plan.previous.contains(path) || !managed_file_exists(plan, path)? {
             fs::write(plan.root.join(path), contents)
                 .with_context(|| format!("failed to write {}", plan.root.join(path).display()))?;
+            checkpoint(OutputPlanCheckpoint::DesiredFileWritten, Some(path))?;
         }
     }
-    let desired_paths = plan.desired.keys().cloned().collect::<BTreeSet<_>>();
     for path in plan.previous.difference(&desired_paths) {
         let full_path = plan.root.join(path);
         if managed_file_exists(plan, path)? {
             fs::remove_file(&full_path)
                 .with_context(|| format!("failed to remove {}", full_path.display()))?;
             remove_empty_managed_parent_directories(plan, path)?;
+            checkpoint(OutputPlanCheckpoint::StaleFileRemoved, Some(path))?;
         }
     }
-    fs::write(
-        plan.root.join(GENERATED_OUTPUT_MANIFEST),
-        generated_output_manifest_bytes(plan)?,
-    )
-    .with_context(|| {
-        format!(
-            "failed to write {}",
-            plan.root.join(GENERATED_OUTPUT_MANIFEST).display()
-        )
-    })?;
+    write_generated_output_manifest(
+        plan,
+        &desired_paths,
+        OutputPlanCheckpoint::FinalManifestStaged,
+        OutputPlanCheckpoint::FinalManifestInstalled,
+        &mut checkpoint,
+    )?;
     Ok(())
+}
+
+fn write_generated_output_manifest(
+    plan: &OutputPlan,
+    paths: &BTreeSet<PathBuf>,
+    staged: OutputPlanCheckpoint,
+    installed: OutputPlanCheckpoint,
+    checkpoint: &mut impl FnMut(OutputPlanCheckpoint, Option<&Path>) -> Result<()>,
+) -> Result<()> {
+    let marker = plan.root.join(GENERATED_OUTPUT_MANIFEST);
+    atomic_write_with_checkpoint(
+        &marker,
+        &generated_output_manifest_bytes_for_paths(plan.kind, paths)?,
+        || checkpoint(staged, None),
+    )
+    .with_context(|| format!("failed to write {}", marker.display()))?;
+    checkpoint(installed, None)
+}
+
+fn atomic_write_with_checkpoint(
+    path: &Path,
+    bytes: &[u8],
+    before_install: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("destination has no parent"))?;
+    ensure_real_directory(parent, "generated-output manifest parent")?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow!("generated-output manifest filename must be UTF-8"))?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temporary = parent.join(format!(
+        ".{file_name}.thor-{nonce}-{}.tmp",
+        std::process::id()
+    ));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .with_context(|| format!("failed to stage {}", temporary.display()))?;
+    file.write_all(bytes)
+        .with_context(|| format!("failed to write {}", temporary.display()))?;
+    file.sync_all()
+        .with_context(|| format!("failed to sync {}", temporary.display()))?;
+    before_install()?;
+    fs::rename(&temporary, path)
+        .with_context(|| format!("failed to install {}", path.display()))?;
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .with_context(|| format!("failed to sync {}", parent.display()))
 }
 
 fn create_managed_parent_directories(plan: &OutputPlan, relative: &Path) -> Result<()> {
@@ -791,12 +875,19 @@ fn remove_empty_managed_parent_directories(plan: &OutputPlan, relative: &Path) -
 }
 
 fn generated_output_manifest_bytes(plan: &OutputPlan) -> Result<Vec<u8>> {
+    let paths = plan.desired.keys().cloned().collect::<BTreeSet<_>>();
+    generated_output_manifest_bytes_for_paths(plan.kind, &paths)
+}
+
+fn generated_output_manifest_bytes_for_paths(
+    kind: OutputKind,
+    paths: &BTreeSet<PathBuf>,
+) -> Result<Vec<u8>> {
     canonical_json(&GeneratedOutputManifest {
         format: GENERATED_OUTPUT_FORMAT.to_owned(),
-        output: plan.kind.as_str().to_owned(),
-        paths: plan
-            .desired
-            .keys()
+        output: kind.as_str().to_owned(),
+        paths: paths
+            .iter()
             .map(|path| path.to_string_lossy().into_owned())
             .collect(),
     })
@@ -1081,6 +1172,16 @@ requestedAccess: read-only
 Review the change.
 "#;
 
+    const ADDED_AGENT: &str = r#"---
+id: architect
+description: Designs changes.
+model: frontier
+requestedAccess: read-only
+---
+
+Design the change.
+"#;
+
     #[test]
     fn defaults_to_the_assets_source_directory() {
         let cli = Cli::try_parse_from(["thor-build", "validate"]).unwrap();
@@ -1292,6 +1393,49 @@ Review the change.
             ".agents/skills/obsolete/SKILL.md",
         ] {
             assert!(!root.join(path).exists(), "{path} should be removed");
+        }
+    }
+
+    #[test]
+    fn interrupted_agent_additions_recover_for_each_target_and_rollback() {
+        for (selection, kind, path) in [
+            (
+                TargetSelection::One(Harness::Claude),
+                OutputKind::Claude,
+                Path::new("agents/architect.md"),
+            ),
+            (
+                TargetSelection::One(Harness::Codex),
+                OutputKind::CodexAgents,
+                Path::new("agents/architect.toml"),
+            ),
+            (
+                TargetSelection::All,
+                OutputKind::CodexAgents,
+                Path::new("agents/architect.toml"),
+            ),
+        ] {
+            assert_interrupted_transform_recovers(
+                selection,
+                kind,
+                OutputPlanCheckpoint::DesiredFileWritten,
+                Some(path),
+            );
+        }
+    }
+
+    #[test]
+    fn interrupted_manifest_replacement_preserves_recoverable_inventory() {
+        for checkpoint in [
+            OutputPlanCheckpoint::TransitionManifestStaged,
+            OutputPlanCheckpoint::FinalManifestStaged,
+        ] {
+            assert_interrupted_transform_recovers(
+                TargetSelection::All,
+                OutputKind::CodexAgents,
+                checkpoint,
+                None,
+            );
         }
     }
 
@@ -1576,5 +1720,124 @@ Review the change.
             "---\nname: obsolete\ndescription: An obsolete skill.\n---\n\nRemove me.\n",
         )
         .unwrap();
+    }
+
+    fn assert_interrupted_transform_recovers(
+        selection: TargetSelection,
+        interrupted_kind: OutputKind,
+        interrupted_checkpoint: OutputPlanCheckpoint,
+        interrupted_path: Option<&Path>,
+    ) {
+        for retry_candidate in [true, false] {
+            let source = tempdir().unwrap();
+            write_source(source.path());
+            let root = source.path().join("project");
+            fs::create_dir(&root).unwrap();
+            transform(source.path(), selection.clone(), &root, false).unwrap();
+
+            let unrelated = root.join(match interrupted_kind {
+                OutputKind::Claude => ".claude/agents/local.md",
+                OutputKind::CodexAgents | OutputKind::CodexSkills => ".codex/agents/local.toml",
+            });
+            fs::write(&unrelated, "unrelated\n").unwrap();
+            fs::write(source.path().join("agents/architect.md"), ADDED_AGENT).unwrap();
+
+            interrupt_transform(
+                source.path(),
+                selection.clone(),
+                &root,
+                interrupted_kind,
+                interrupted_checkpoint,
+                interrupted_path,
+            );
+            assert_generated_manifests_are_valid(&root);
+
+            if retry_candidate {
+                transform(source.path(), selection.clone(), &root, false).unwrap();
+                assert_selected_architect_outputs(&root, &selection, true);
+            }
+
+            fs::remove_file(source.path().join("agents/architect.md")).unwrap();
+            transform(source.path(), selection.clone(), &root, false).unwrap();
+            transform(source.path(), selection.clone(), &root, true).unwrap();
+
+            assert_selected_architect_outputs(&root, &selection, false);
+            assert_eq!(fs::read_to_string(&unrelated).unwrap(), "unrelated\n");
+        }
+    }
+
+    fn interrupt_transform(
+        source: &Path,
+        selection: TargetSelection,
+        root: &Path,
+        interrupted_kind: OutputKind,
+        interrupted_checkpoint: OutputPlanCheckpoint,
+        interrupted_path: Option<&Path>,
+    ) {
+        let pack = SourcePack::load(source).unwrap();
+        let targets = match selection {
+            TargetSelection::All => pack.manifest.spec.targets.clone(),
+            TargetSelection::One(target) => vec![target],
+        };
+        let skill_payloads = collect_skill_payloads_with_definitions(
+            source.join("skills"),
+            pack.definition_bundles(),
+        )
+        .unwrap();
+        let mut plans = output_plans(root, &pack, &targets, &skill_payloads).unwrap();
+        for plan in &mut plans {
+            prepare_output_plan(plan).unwrap();
+        }
+
+        for plan in &plans {
+            if plan.kind != interrupted_kind {
+                apply_output_plan(plan).unwrap();
+                continue;
+            }
+            let error = apply_output_plan_with_checkpoint(plan, |checkpoint, path| {
+                if checkpoint == interrupted_checkpoint
+                    && interrupted_path.is_none_or(|expected| path == Some(expected))
+                {
+                    bail!("simulated transform interruption");
+                }
+                Ok(())
+            })
+            .unwrap_err();
+            assert!(format!("{error:#}").contains("simulated transform interruption"));
+            return;
+        }
+        panic!("interrupted output plan was not selected");
+    }
+
+    fn assert_generated_manifests_are_valid(root: &Path) {
+        for relative in [
+            ".claude/.thor-generated.json",
+            ".codex/.thor-generated.json",
+            ".agents/.thor-generated.json",
+        ] {
+            let marker = root.join(relative);
+            if marker.exists() {
+                serde_json::from_slice::<GeneratedOutputManifest>(&fs::read(marker).unwrap())
+                    .unwrap();
+            }
+        }
+    }
+
+    fn assert_selected_architect_outputs(root: &Path, selection: &TargetSelection, present: bool) {
+        let paths: &[&str] = match selection {
+            TargetSelection::All => &[
+                ".claude/agents/architect.md",
+                ".codex/agents/architect.toml",
+            ],
+            TargetSelection::One(Harness::Claude) => &[".claude/agents/architect.md"],
+            TargetSelection::One(Harness::Codex) => &[".codex/agents/architect.toml"],
+        };
+        for path in paths {
+            assert_eq!(
+                root.join(path).exists(),
+                present,
+                "unexpected state for {path}"
+            );
+        }
     }
 }

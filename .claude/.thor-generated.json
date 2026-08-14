@@ -2,6 +2,7 @@
   "format": "thor-generated-output/v1",
   "output": "claude",
   "paths": [
+    "agents/architect.md",
     "agents/design-contract-resolver.md",
     "agents/lens-architecture-boundaries-reviewer.md",
     "agents/lens-concurrency-distributed-systems-reviewer.md",
