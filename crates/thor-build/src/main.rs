@@ -12,8 +12,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
 use thor_core::{
     ArtifactManifest, ArtifactPackage, Harness, PayloadDigest, SignatureEnvelope, SourcePack,
-    collect_skill_payloads, collect_skill_payloads_with_definitions, collect_static_payloads,
-    render_claude, render_codex,
+    collect_skill_payloads_with_definitions, collect_static_payloads, render_claude, render_codex,
 };
 use zip::{CompressionMethod, ZipWriter, write::FileOptions};
 
@@ -106,8 +105,11 @@ fn main() -> Result<()> {
         Command::Validate { source } => {
             let pack = SourcePack::load(&source)
                 .with_context(|| format!("invalid source {}", source.display()))?;
-            collect_skill_payloads(source.join("skills"))
-                .with_context(|| format!("invalid skills in {}", source.display()))?;
+            collect_skill_payloads_with_definitions(
+                source.join("skills"),
+                pack.definition_bundles(),
+            )
+            .with_context(|| format!("invalid skills in {}", source.display()))?;
             for target in Harness::ALL {
                 collect_static_payloads(source.join(format!(".{}", target.as_str())), target)?;
             }
@@ -326,7 +328,8 @@ fn transform(source: &Path, selection: TargetSelection, root: &Path, check: bool
             );
         }
     }
-    let skill_payloads = collect_skill_payloads(source.join("skills"))?;
+    let skill_payloads =
+        collect_skill_payloads_with_definitions(source.join("skills"), pack.definition_bundles())?;
 
     let mut plans = output_plans(root, &pack, &targets, &skill_payloads)?;
     for plan in &mut plans {
