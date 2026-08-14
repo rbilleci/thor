@@ -16,6 +16,15 @@ spec:
         codex:
           model: gpt-5.6-luna
           effort: high
+    assurance-scope-selector:
+      description: Assurance Scope Selector
+      targets:
+        claude:
+          model: sonnet
+          effort: high
+        codex:
+          model: gpt-5.6-terra
+          effort: high
     slicer:
       description: Workhorse
       targets:
