@@ -18,6 +18,7 @@ use walkdir::WalkDir;
 pub const API_VERSION: &str = "thor/v1alpha1";
 pub const KIND: &str = "AgentPack";
 pub const SCHEMA: &str = include_str!("../../../schema/thor-v1.schema.json");
+pub const MAX_COMPRESSED_BUNDLE_BYTES: u64 = 100 * 1024 * 1024;
 pub const MAX_UNCOMPRESSED_BUNDLE_BYTES: u64 = 100 * 1024 * 1024;
 const AGENT_INSTRUCTIONS_SLOT: &str = "{{agent_instructions}}";
 const DEFINITION_BUNDLES_SLOT: &str = "{{definition_bundles}}";
@@ -25,6 +26,30 @@ const SKILL_DEFINITION_DIRECTIVE_PREFIX: &str = "<!-- thor:definitions: ";
 const SKILL_DEFINITION_DIRECTIVE_SUFFIX: &str = " -->";
 
 pub type Result<T> = std::result::Result<T, ThorError>;
+
+#[derive(Debug)]
+pub struct PayloadByteBudget {
+    remaining: u64,
+}
+
+impl PayloadByteBudget {
+    pub fn new(limit: u64) -> Self {
+        Self { remaining: limit }
+    }
+
+    pub fn ensure_can_read(&self, path: &Path, bytes: u64) -> Result<()> {
+        if bytes > self.remaining {
+            return validation(path, "bundle payloads exceed uncompressed size limit");
+        }
+        Ok(())
+    }
+
+    pub fn consume(&mut self, path: &Path, bytes: u64) -> Result<()> {
+        self.ensure_can_read(path, bytes)?;
+        self.remaining -= bytes;
+        Ok(())
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum ThorError {
@@ -712,7 +737,20 @@ fn extract_skill_definition_directive(
 /// archive-path order. Thor preprocesses only each `SKILL.md`; scripts,
 /// references, and assets are copied as opaque bytes and are never run.
 pub fn collect_skill_payloads(skills_root: impl AsRef<Path>) -> Result<BTreeMap<String, Vec<u8>>> {
-    let skills_root = skills_root.as_ref();
+    collect_skill_payloads_inner(skills_root.as_ref(), None)
+}
+
+pub fn collect_skill_payloads_with_budget(
+    skills_root: impl AsRef<Path>,
+    budget: &mut PayloadByteBudget,
+) -> Result<BTreeMap<String, Vec<u8>>> {
+    collect_skill_payloads_inner(skills_root.as_ref(), Some(budget))
+}
+
+fn collect_skill_payloads_inner(
+    skills_root: &Path,
+    mut budget: Option<&mut PayloadByteBudget>,
+) -> Result<BTreeMap<String, Vec<u8>>> {
     if !skills_root.exists() {
         return Ok(BTreeMap::new());
     }
@@ -756,6 +794,10 @@ pub fn collect_skill_payloads(skills_root: impl AsRef<Path>) -> Result<BTreeMap<
         validate_identifier(&skill_dir, "skill directory name", &skill_id)?;
 
         let skill_file = skill_dir.join("SKILL.md");
+        ensure_regular_source_file(&skill_file, "skill definition")?;
+        if let Some(budget) = budget.as_deref_mut() {
+            budget.ensure_can_read(&skill_file, source_file_size(&skill_file)?)?;
+        }
         let skill = parse_skill_file(&skill_file)?;
         if skill.frontmatter.name != skill_id {
             return validation(
@@ -797,11 +839,17 @@ pub fn collect_skill_payloads(skills_root: impl AsRef<Path>) -> Result<BTreeMap<
                 let bytes = if walked.path() == skill_file {
                     preprocess_skill_file(source_root, walked.path())?
                 } else {
+                    if let Some(budget) = budget.as_deref_mut() {
+                        budget.ensure_can_read(walked.path(), source_file_size(walked.path())?)?;
+                    }
                     fs::read(walked.path()).map_err(|source| ThorError::Read {
                         path: walked.path().to_path_buf(),
                         source,
                     })?
                 };
+                if let Some(budget) = budget.as_deref_mut() {
+                    budget.consume(walked.path(), bytes.len() as u64)?;
+                }
                 if payloads.insert(archive_path.clone(), bytes).is_some() {
                     return validation(
                         walked.path(),
@@ -820,7 +868,22 @@ pub fn collect_static_payloads(
     static_root: impl AsRef<Path>,
     target: Harness,
 ) -> Result<BTreeMap<String, Vec<u8>>> {
-    let static_root = static_root.as_ref();
+    collect_static_payloads_inner(static_root.as_ref(), target, None)
+}
+
+pub fn collect_static_payloads_with_budget(
+    static_root: impl AsRef<Path>,
+    target: Harness,
+    budget: &mut PayloadByteBudget,
+) -> Result<BTreeMap<String, Vec<u8>>> {
+    collect_static_payloads_inner(static_root.as_ref(), target, Some(budget))
+}
+
+fn collect_static_payloads_inner(
+    static_root: &Path,
+    target: Harness,
+    mut budget: Option<&mut PayloadByteBudget>,
+) -> Result<BTreeMap<String, Vec<u8>>> {
     if !static_root.exists() {
         return Ok(BTreeMap::new());
     }
@@ -875,10 +938,16 @@ pub fn collect_static_payloads(
                     message,
                 },
             )?;
+            if let Some(budget) = budget.as_deref_mut() {
+                budget.ensure_can_read(walked.path(), source_file_size(walked.path())?)?;
+            }
             let bytes = fs::read(walked.path()).map_err(|source| ThorError::Read {
                 path: walked.path().to_path_buf(),
                 source,
             })?;
+            if let Some(budget) = budget.as_deref_mut() {
+                budget.consume(walked.path(), bytes.len() as u64)?;
+            }
             if payloads.insert(archive_path.clone(), bytes).is_some() {
                 return validation(
                     walked.path(),
@@ -888,6 +957,15 @@ pub fn collect_static_payloads(
         }
     }
     Ok(payloads)
+}
+
+fn source_file_size(path: &Path) -> Result<u64> {
+    fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .map_err(|source| ThorError::Read {
+            path: path.to_path_buf(),
+            source,
+        })
 }
 
 pub fn render_claude(agent: &ResolvedAgent) -> String {

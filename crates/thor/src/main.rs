@@ -17,7 +17,10 @@ use reqwest::blocking::Client;
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use thor_core::{ArtifactManifest, Harness, MAX_UNCOMPRESSED_BUNDLE_BYTES, SignatureEnvelope};
+use thor_core::{
+    ArtifactManifest, Harness, MAX_COMPRESSED_BUNDLE_BYTES, MAX_UNCOMPRESSED_BUNDLE_BYTES,
+    SignatureEnvelope,
+};
 use zip::ZipArchive;
 
 const CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -527,6 +530,7 @@ fn verify_bundle_with_public_key(
     signature_bytes: &[u8],
     public_key_hex: String,
 ) -> Result<VerifiedBundle> {
+    validate_compressed_bundle_size(archive.len() as u64)?;
     let public_key = parse_public_key(&public_key_hex)?;
     let envelope: SignatureEnvelope =
         serde_json::from_slice(signature_bytes).context("detached signature is not valid JSON")?;
@@ -1109,11 +1113,19 @@ fn github_download(client: &Client, url: &str) -> Result<Vec<u8>> {
         .with_context(|| format!("cannot download {url}"))?
         .error_for_status()
         .with_context(|| format!("download failed for {url}"))?;
-    let bytes = response.bytes().context("cannot read release asset")?;
-    if bytes.len() as u64 > MAX_UNCOMPRESSED_BUNDLE_BYTES {
-        bail!("release asset exceeds Thor's bundle size limit");
+    if let Some(bytes) = response.content_length() {
+        validate_compressed_bundle_size(bytes)?;
     }
+    let bytes = response.bytes().context("cannot read release asset")?;
+    validate_compressed_bundle_size(bytes.len() as u64)?;
     Ok(bytes.to_vec())
+}
+
+fn validate_compressed_bundle_size(bytes: u64) -> Result<()> {
+    if bytes > MAX_COMPRESSED_BUNDLE_BYTES {
+        bail!("bundle exceeds compressed size limit");
+    }
+    Ok(())
 }
 
 fn resolve_tag_commit(client: &Client, repository: &str, tag: &str) -> Result<String> {
@@ -2756,6 +2768,12 @@ mod tests {
         let last = tampered.len() - 1;
         tampered[last] ^= 1;
         assert!(verify_bundle_with_public_key(&tampered, &signature, key).is_err());
+    }
+
+    #[test]
+    fn rejects_archives_over_the_shared_compressed_limit() {
+        assert!(validate_compressed_bundle_size(MAX_COMPRESSED_BUNDLE_BYTES).is_ok());
+        assert!(validate_compressed_bundle_size(MAX_COMPRESSED_BUNDLE_BYTES + 1).is_err());
     }
 
     #[test]
