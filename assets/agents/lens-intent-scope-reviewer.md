@@ -1,9 +1,9 @@
 ---
 id: lens-intent-scope-reviewer
-description: "Read-only first-tier reviewer for requirement coverage, acceptance criteria, non-goals, and unauthorized scope changes."
+description: "Read-only focused reviewer for requirement coverage, acceptance criteria, non-goals, and unauthorized scope changes."
 model: lens-reviewer
 requestedAccess: read-only
-template: first-tier-reviewer
+template: focused-reviewer
 definitions: [assurance-results, slice-identity]
 ---
 

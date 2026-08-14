@@ -1,9 +1,9 @@
 ---
 id: lens-concurrency-distributed-systems-reviewer
-description: "Read-only first-tier reviewer for interleavings, atomicity, ordering, visibility, duplicate delivery, stale reads, clocks, and distributed coordination."
+description: "Read-only focused reviewer for interleavings, atomicity, ordering, visibility, duplicate delivery, stale reads, clocks, and distributed coordination."
 model: lens-reviewer
 requestedAccess: read-only
-template: first-tier-reviewer
+template: focused-reviewer
 definitions: [assurance-results, slice-identity]
 ---
 

@@ -1,9 +1,9 @@
 ---
 id: lens-security-privacy-abuse-reviewer
-description: "Read-only first-tier reviewer for authorization, trust boundaries, sensitive data, privacy obligations, privilege escalation, and feasible abuse paths."
+description: "Read-only focused reviewer for authorization, trust boundaries, sensitive data, privacy obligations, privilege escalation, and feasible abuse paths."
 model: lens-reviewer
 requestedAccess: read-only
-template: first-tier-reviewer
+template: focused-reviewer
 definitions: [assurance-results, slice-identity]
 ---
 

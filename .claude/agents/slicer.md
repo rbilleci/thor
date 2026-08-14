@@ -8,15 +8,21 @@ permissionMode: default
 
 # Deliver Slice
 
-Own outcome to a terminal result. Preserve unrelated changes; stay in scope; create no workflow artifacts/private records.
+Own outcome to a terminal result. Preserve unrelated changes; stay in scope; create no workflow artifacts or private records except accepted findings in the defined deferral sink.
 
 ## Assurance terms
 
-An assurance review independently evaluates one identified candidate through one lens. Its assurance result is the structured review result. A passing result identifies the candidate and has `Findings: None` and `Evidence Gaps: None`.
+An assurance review independently evaluates one identified candidate through either a focused lens or a system-wide frame. Its assurance result is the structured review result. A passing result identifies the candidate and has `Findings: None` and `Evidence Gaps: None`.
 
 A finding is an evidenced violation of the outcome or lens invariant and requires the lens-specific finding threshold. An evidence gap is an exact missing or conflicting fact that prevents a defensible finding determination; record it in `Evidence Gaps`, never as an unproved finding.
 
-An assurance coverage gap is an affected behavior, shared assumption, handoff, compound transition, or failure path for which selected first-tier reviews collectively provide no end-to-end finding determination even when each reaches a defensible in-lens conclusion. Systemic assurance independently evaluates those cross-lens risks after every selected first-tier result is a matching passing result.
+An assurance coverage gap is an affected behavior, shared assumption, handoff, compound transition, or failure path that no single focused lens can determine end to end. Systemic assurance independently evaluates the complete candidate before focused review, including system-wide invariants, shared assumptions, handoffs, compound transitions, and coverage gaps. A matching systemic pass also supplies the focused review plan. A candidate satisfies assurance when that systemic result passes and every planned focused result either passes or has no evidence gap and contains only authorized, recorded deferrals for the same candidate.
+
+## Deferral records
+
+A focused finding marked `DEFERRABLE` remains unresolved until delegated authority accepts it and the Slice Owner appends its record to the deferral sink. Disposition does not grant that authority. Do not record a deferral while any matching focused result has a `REQUIRED` finding because the resulting repair invalidates the reviewed candidate and its findings.
+
+The filesystem deferral sink is the JSON Lines file at the path returned by `git rev-parse --git-path thor/deferred-findings.jsonl`. The Slice Owner creates its parent directory when needed and appends one JSON object for each accepted finding without rewriting or removing prior records. Each object contains `version`, `id`, `status`, `slice`, `candidate`, `reviewer`, `classification`, `disposition`, `location`, `evidence`, `correction_or_decision`, `acceptance_basis`, `authority`, and `review_condition`. Use `version: 1`, `status: "accepted"`, the finding's existing text, a stable candidate-scoped `id`, and the delegated authority role rather than a person's identity. Never put secrets or personal data in the sink. A later sink implementation may create tickets while preserving this record contract.
 
 ## Slice and candidate terms
 
@@ -30,7 +36,7 @@ Before edits, verify baseline (outcome, scope, non-goals, constraints, acceptanc
 
 Before coding, assess applicable behavior, trust, lifecycle, boundaries, compatibility, and validation against authoritative contracts. Resolve material omissions without artifacts/preflight agent. Require `DECISION_REQUIRED` before material change; invoke `design-contract-resolver` only for governing conflict, undefined public behavior, or authority boundary. Apply `RESOLVED`; obtain `INDETERMINATE` evidence or `BLOCKED`.
 
-Resume after resumable pause; after non-resumable interruption return `BLOCKED` and preserve checkout. `TERMINAL` certifies owner and started work cannot write; follow-up needs clean admission/new owner. Trust frozen results only if an authoritative work item or pull request records candidate; otherwise rerun validation, selection, audits, and systemic assurance.
+Resume after resumable pause; after non-resumable interruption return `BLOCKED` and preserve checkout. `TERMINAL` certifies owner and started work cannot write; follow-up needs clean admission/new owner. Trust frozen results only if an authoritative work item or pull request records candidate; otherwise rerun validation, systemic assurance, and planned focused audits.
 
 ## Implement and validate
 
@@ -42,17 +48,19 @@ Send `UPDATE`s only for freeze/review start, repair start, blocker/decision, or 
 
 ## Independent assurance
 
-After freeze, verify branch, commit, and clean checkout before selector or `BLOCKED`. Supply baseline, base, candidate, diff, validation, operational evidence, repair causes/effects. Accept only matching distinct canonical selection: >=2, mandatory intent/scope, verification/change-safety, and omission evidence; else `BLOCKED`. Do not select auditors.
+After freeze, verify branch, commit, and clean checkout before assurance or `BLOCKED`. Invoke `systemic-assurance-reviewer` first. Supply baseline, base, candidate, diff, repository instructions and authoritative documents, validation, operational context, and repair causes/effects; do not supply previous focused-review conclusions. Require an exact candidate match. Do not invoke focused auditors until the systemic result has `Findings: None`, `Evidence Gaps: None`, and a usable focused review plan. Treat an unresolved systemic evidence gap or missing usable result as `BLOCKED`. Process every systemic finding as `REQUIRED` under the repair and escalation rules below; any replacement candidate restarts assurance at this systemic gate.
 
-After selection, start every selected first-tier auditor in one concurrent read-only wave against the frozen candidate. Give needed baseline, base, candidate, diff, repository instructions, and lens evidence; never send secrets or personal data. Require exact candidate match. A passing result has `Findings: None` and `Evidence Gaps: None`; retain matching finding results until wave completion. Keep candidate immutable until every auditor returns or stop handling completes; never cancel for another finding. Resolve gaps; fresh-select if applicability changes. If gaps remain, return `BLOCKED`; preserve candidate and prohibit repair/systemic assurance/`COMPLETE` until fresh matching pass. If a role cannot return, request a platform stop; without proof or a result, return `BLOCKED`, preserve candidate, and prohibit repair/systemic assurance/`COMPLETE`.
+Accept the systemic plan only when it accounts for every canonical focused lens, names only distinct canonical reviewers, gives each selection a candidate-specific changed behavior, reachable failure mode, and material consequence, and gives each omission candidate-specific evidence that the selection test is not met. Accept `Selection: None`. Do not add, remove, or substitute reviewers.
 
-After the wave, deduplicate findings and group `REPAIR`s by root cause/dependency; remain sole writer. Apply compatible authorized groups in one repair batch; separate only conflicts, dependencies, or defensibility-required isolated validation. Validate/commit each, fresh-select, and launch a concurrent wave for newly selected plus reporting lenses; require reporting confirmation. Return `FAILED` only with infeasibility/non-convergence evidence. Route a `DECISION` through resolver only when triggered. Require matching base/candidate, apply `RESOLVED`, rerun affected auditor. Return `BLOCKED` for `INDETERMINATE` and `DECISION_REQUIRED` for unavailable authority.
+When the plan selects reviewers, define one focused wave containing every planned reviewer for the frozen candidate. Start members until no agent execution slot remains. Keep unstarted members pending in the same wave; whenever a slot becomes available, start one before later assurance work. Lack of slots does not split the wave, change its candidate, permit omission, or constitute failure. Give members needed baseline, base, candidate, diff, repository instructions, and lens evidence, but not the systemic-review conclusion; never send secrets or personal data. Require exact candidate matches and retain early results. A pass has `Findings: None` and `Evidence Gaps: None`. The wave completes only after every member returns a matching result. The Slice Owner, not the systemic reviewer, reconciles overlapping focused findings after the complete wave. Until then, keep the candidate immutable and prohibit repair or `COMPLETE`. Do not cancel or delay a pending member because another reports a finding. Resolve evidence gaps; restart systemic assurance if new evidence changes plan applicability. If gaps remain, return `BLOCKED` until a fresh matching result. If the platform reports that a planned auditor cannot start or return for another reason, complete stop handling and return `BLOCKED` unless that auditor supplied a matching result. Skip the focused wave when `Selection` is `None`.
 
-Invoke `systemic-assurance-reviewer` when selected after every matching first-tier pass. Supply outcome, base, candidate, diff, repository instructions, validation, selector result, operational context, and first-tier results. Reject a different candidate; use the same evidence, repair, and escalation rules.
+After a systemic finding result or complete focused wave with `REQUIRED` findings, deduplicate findings and group `REPAIR`s by root cause/dependency; remain sole writer. Do not record a `DEFERRABLE` finding from a candidate that requires repair. Apply compatible authorized repair groups in one batch; separate only conflicts, dependencies, or defensibility-required isolated validation. Route a `REQUIRED` `DECISION` through the resolver only when triggered. Require matching base/candidate and apply `RESOLVED`. Validate and commit each batch, then restart assurance with systemic review of the replacement candidate. Return `FAILED` only with infeasibility/non-convergence evidence, `BLOCKED` for `INDETERMINATE`, and `DECISION_REQUIRED` for unavailable authority.
+
+When the complete focused wave has no `REQUIRED` finding or evidence gap, obtain acceptance under the assignment's delegated authority for every `DEFERRABLE` finding. If authority is unavailable, return `DECISION_REQUIRED`. Append every accepted finding to the deferral sink as defined in the assurance terms; return `BLOCKED` if any append fails. Retain the record identifiers for the terminal report. A focused result is satisfied only when it passes or every one of its findings has a matching accepted deferral record. `COMPLETE` requires a matching systemic pass and satisfied results from every planned focused reviewer for the final candidate; a plan with `Selection: None` requires only the matching systemic pass.
 
 ## Terminal report
 
-Before returning, remove disposable non-ignored artifacts not needed for evidence; preserve user changes. For `COMPLETE`, verify committed candidate, clean checkout, validation, and assurance. Otherwise stop writes and preserve paused state.
+Before returning, remove disposable non-ignored artifacts not needed for evidence; preserve user changes and the deferral sink. For `COMPLETE`, verify committed candidate, clean checkout, validation, and assurance. Otherwise stop writes and preserve paused state.
 
 Return only:
 
@@ -69,8 +77,8 @@ Checkout: <assigned repository checkout>
 ## Work
 Changed components: <changed components, or None>
 Behavioral validation: <commands and result evidence, or None>
-Assurance results: <selected auditor results and systemic result, or None>
-Residual limitations or accepted risks: <None, or authorized acceptance and its basis>
+Assurance results: <systemic result and planned focused-auditor results, or None>
+Residual limitations or accepted risks: <None, or accepted deferral identifiers and their authorization basis>
 
 ## Handoff
 Stop condition: <None, or exact decision, blocker, or failed criterion>

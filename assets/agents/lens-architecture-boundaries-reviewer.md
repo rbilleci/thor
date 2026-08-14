@@ -1,9 +1,9 @@
 ---
 id: lens-architecture-boundaries-reviewer
-description: "Read-only first-tier reviewer for responsibility ownership, dependency direction, isolation, coupling, and architectural boundary integrity."
+description: "Read-only focused reviewer for responsibility ownership, dependency direction, isolation, coupling, and architectural boundary integrity."
 model: lens-reviewer
 requestedAccess: read-only
-template: first-tier-reviewer
+template: focused-reviewer
 definitions: [assurance-results, slice-identity]
 ---
 

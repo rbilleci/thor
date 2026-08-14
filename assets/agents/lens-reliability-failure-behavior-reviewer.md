@@ -1,9 +1,9 @@
 ---
 id: lens-reliability-failure-behavior-reviewer
-description: "Read-only first-tier reviewer for failure semantics, retries, timeouts, partial success, recovery, dependency degradation, and operational resilience."
+description: "Read-only focused reviewer for failure semantics, retries, timeouts, partial success, recovery, dependency degradation, and operational resilience."
 model: lens-reviewer
 requestedAccess: read-only
-template: first-tier-reviewer
+template: focused-reviewer
 definitions: [assurance-results, slice-identity]
 ---
 

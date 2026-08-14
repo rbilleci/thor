@@ -1,9 +1,9 @@
 ---
 id: lens-functional-domain-correctness-reviewer
-description: "Read-only first-tier reviewer for business rules, state transitions, calculations, boundary cases, and observable domain correctness."
+description: "Read-only focused reviewer for business rules, state transitions, calculations, boundary cases, and observable domain correctness."
 model: lens-reviewer
 requestedAccess: read-only
-template: first-tier-reviewer
+template: focused-reviewer
 definitions: [assurance-results, slice-identity]
 ---
 

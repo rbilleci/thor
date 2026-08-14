@@ -1,9 +1,9 @@
 ---
 id: lens-interfaces-compatibility-reviewer
-description: "Read-only first-tier reviewer for public contracts, protocol semantics, schema evolution, caller compatibility, and mixed-version behavior."
+description: "Read-only focused reviewer for public contracts, protocol semantics, schema evolution, caller compatibility, and mixed-version behavior."
 model: lens-reviewer
 requestedAccess: read-only
-template: first-tier-reviewer
+template: focused-reviewer
 definitions: [assurance-results, slice-identity]
 ---
 

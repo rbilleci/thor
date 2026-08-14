@@ -1,9 +1,9 @@
 ---
 id: lens-data-integrity-lifecycle-reviewer
-description: "Read-only first-tier reviewer for data invariants across persistence, migration, caching, retention, deletion, restoration, and replay."
+description: "Read-only focused reviewer for data invariants across persistence, migration, caching, retention, deletion, restoration, and replay."
 model: lens-reviewer
 requestedAccess: read-only
-template: first-tier-reviewer
+template: focused-reviewer
 definitions: [assurance-results, slice-identity]
 ---
 

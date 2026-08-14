@@ -1,9 +1,9 @@
 ---
 id: lens-performance-scalability-reviewer
-description: "Read-only first-tier reviewer for algorithmic cost, resource amplification, hot paths, query behavior, contention, capacity, and workload scaling."
+description: "Read-only focused reviewer for algorithmic cost, resource amplification, hot paths, query behavior, contention, capacity, and workload scaling."
 model: lens-reviewer
 requestedAccess: read-only
-template: first-tier-reviewer
+template: focused-reviewer
 definitions: [assurance-results, slice-identity]
 ---
 

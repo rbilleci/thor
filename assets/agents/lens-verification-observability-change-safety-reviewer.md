@@ -1,9 +1,9 @@
 ---
 id: lens-verification-observability-change-safety-reviewer
-description: "Read-only first-tier reviewer for behavioral evidence, truthful diagnostics, component rollout controls, rollback mechanisms, and change containment."
+description: "Read-only focused reviewer for behavioral evidence, truthful diagnostics, component rollout controls, rollback mechanisms, and change containment."
 model: lens-reviewer
 requestedAccess: read-only
-template: first-tier-reviewer
+template: focused-reviewer
 definitions: [assurance-results, slice-identity]
 ---
 
