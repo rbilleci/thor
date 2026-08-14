@@ -87,6 +87,7 @@
         "description": { "type": "string", "minLength": 1, "pattern": "^[^\\r\\n]+$" },
         "model": { "$ref": "#/$defs/identifier" },
         "requestedAccess": { "type": "string", "enum": ["inherit", "read-only", "workspace-write"] },
+        "template": { "$ref": "#/$defs/identifier" },
         "targets": {
           "type": "object",
           "additionalProperties": false,

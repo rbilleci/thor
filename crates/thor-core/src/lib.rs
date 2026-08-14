@@ -18,6 +18,7 @@ use walkdir::WalkDir;
 pub const API_VERSION: &str = "thor/v1alpha1";
 pub const KIND: &str = "AgentPack";
 pub const SCHEMA: &str = include_str!("../../../schema/thor-v1.schema.json");
+const AGENT_INSTRUCTIONS_SLOT: &str = "{{agent_instructions}}";
 
 pub type Result<T> = std::result::Result<T, ThorError>;
 
@@ -134,6 +135,7 @@ pub struct AgentFrontmatter {
     pub model: String,
     #[serde(rename = "requestedAccess")]
     pub requested_access: RequestedAccess,
+    pub template: Option<String>,
     #[serde(default)]
     pub targets: AgentTargets,
 }
@@ -269,7 +271,9 @@ impl SourcePack {
             if !file_type.is_file() || entry.path().extension().is_none_or(|ext| ext != "md") {
                 return validation(entry.path(), "agents/ may contain only Markdown files");
             }
-            agents.push(parse_agent_file(entry.path())?);
+            let mut agent = parse_agent_file(entry.path())?;
+            expand_agent_template(root, &mut agent)?;
+            agents.push(agent);
         }
         if agents.is_empty() {
             return validation(agents_dir, "at least one agent definition is required");
@@ -362,6 +366,37 @@ pub fn parse_agent_file(path: impl AsRef<Path>) -> Result<AgentDefinition> {
         instructions: instructions.to_owned(),
         source_path: path.to_path_buf(),
     })
+}
+
+fn expand_agent_template(root: &Path, agent: &mut AgentDefinition) -> Result<()> {
+    let Some(template_id) = agent.frontmatter.template.as_deref() else {
+        return Ok(());
+    };
+    validate_identifier(&agent.source_path, "agent template", template_id)?;
+
+    let templates_dir = root.join("templates");
+    ensure_real_directory(&templates_dir, "templates directory")?;
+    let template_path = templates_dir.join(format!("{template_id}.md"));
+    ensure_regular_source_file(&template_path, "agent template")?;
+    let template = read_utf8(&template_path)?;
+
+    let slot_count = template.match_indices(AGENT_INSTRUCTIONS_SLOT).count();
+    if slot_count != 1 {
+        return validation(
+            &template_path,
+            format!("agent template must contain exactly one {AGENT_INSTRUCTIONS_SLOT} slot"),
+        );
+    }
+    let template_without_slot = template.replacen(AGENT_INSTRUCTIONS_SLOT, "", 1);
+    if template_without_slot.contains("{{") || template_without_slot.contains("}}") {
+        return validation(
+            &template_path,
+            format!("agent template supports only the {AGENT_INSTRUCTIONS_SLOT} slot"),
+        );
+    }
+
+    agent.instructions = template.replacen(AGENT_INSTRUCTIONS_SLOT, agent.instructions.trim(), 1);
+    Ok(())
 }
 
 pub fn parse_skill_file(path: impl AsRef<Path>) -> Result<SkillDefinition> {
@@ -1014,6 +1049,66 @@ Review the requested change and report actionable findings only.
     }
 
     #[test]
+    fn expands_one_agent_body_into_a_shared_template_for_both_targets() {
+        let directory = fixture_pack();
+        fs::create_dir(directory.path().join("templates")).unwrap();
+        fs::write(
+            directory.path().join("templates/first-tier-reviewer.md"),
+            "Shared prefix.\n\n{{agent_instructions}}\n\nShared suffix.\n",
+        )
+        .unwrap();
+        let agent_path = directory.path().join("agents/pr-reviewer.md");
+        fs::write(
+            &agent_path,
+            AGENT.replace(
+                "requestedAccess: read-only",
+                "requestedAccess: read-only\ntemplate: first-tier-reviewer",
+            ),
+        )
+        .unwrap();
+
+        let pack = SourcePack::load(directory.path()).unwrap();
+        let agent = &pack.agents[0];
+        let expected = "Shared prefix.\n\nReview the requested change and report actionable findings only.\n\nShared suffix.";
+        assert_eq!(agent.instructions.trim(), expected);
+
+        let claude = render_claude(&pack.resolve(agent, Harness::Claude).unwrap());
+        assert!(claude.contains(expected));
+        let codex = render_codex(&pack.resolve(agent, Harness::Codex).unwrap()).unwrap();
+        let parsed: toml::Value = toml::from_str(&codex).unwrap();
+        assert_eq!(parsed["developer_instructions"].as_str(), Some(expected));
+    }
+
+    #[test]
+    fn rejects_agent_templates_without_exactly_one_supported_slot() {
+        for template in [
+            "No slot.\n",
+            "{{agent_instructions}}\n{{agent_instructions}}\n",
+            "{{agent_instructions}}\n{{unsupported}}\n",
+        ] {
+            let directory = fixture_pack();
+            fs::create_dir(directory.path().join("templates")).unwrap();
+            fs::write(
+                directory.path().join("templates/first-tier-reviewer.md"),
+                template,
+            )
+            .unwrap();
+            let agent_path = directory.path().join("agents/pr-reviewer.md");
+            fs::write(
+                &agent_path,
+                AGENT.replace(
+                    "requestedAccess: read-only",
+                    "requestedAccess: read-only\ntemplate: first-tier-reviewer",
+                ),
+            )
+            .unwrap();
+
+            let error = SourcePack::load(directory.path()).unwrap_err();
+            assert!(error.to_string().contains("agent template"));
+        }
+    }
+
+    #[test]
     fn rejects_unknown_target_specific_fields() {
         let directory = fixture_pack();
         let agent_path = directory.path().join("agents/pr-reviewer.md");
@@ -1214,6 +1309,31 @@ Review the requested change and report actionable findings only.
                 .unwrap_err()
                 .to_string()
                 .contains("hard-linked source files are not allowed")
+        );
+
+        let template_link = fixture_pack();
+        let templates = template_link.path().join("templates");
+        fs::create_dir(&templates).unwrap();
+        fs::write(
+            templates.join("real-template.md"),
+            "{{agent_instructions}}\n",
+        )
+        .unwrap();
+        symlink("real-template.md", templates.join("first-tier-reviewer.md")).unwrap();
+        let agent = template_link.path().join("agents/pr-reviewer.md");
+        fs::write(
+            &agent,
+            AGENT.replace(
+                "requestedAccess: read-only",
+                "requestedAccess: read-only\ntemplate: first-tier-reviewer",
+            ),
+        )
+        .unwrap();
+        assert!(
+            SourcePack::load(template_link.path())
+                .unwrap_err()
+                .to_string()
+                .contains("agent template must be a regular file")
         );
     }
 }

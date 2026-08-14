@@ -11,6 +11,7 @@ The normative design and source-format contract are in
 ## What it provides
 
 - One portable agent definition per `assets/agents/<id>.md` file.
+- Optional `assets/templates/<id>.md` wrappers for shared build-time instruction text.
 - A small `assets/thor.yaml` manifest for package metadata plus global logical model
   mappings, each of which supplies target model and Codex-aligned effort.
 - Pack-author rendering directly into Claude Code (`.md`) and Codex (`.toml`)
@@ -24,7 +25,7 @@ The normative design and source-format contract are in
 
 ## Repository layout
 
-- `assets/` — complete Thor pack source: manifest, agents, and skills.
+- `assets/` — complete Thor pack source: manifest, agents, instruction templates, and skills.
 - `schema/` — canonical versioned Thor JSON Schema.
 - `crates/thor-core/` — strict source parsing, validation, skills handling,
   and target renderers.
@@ -45,6 +46,8 @@ my-pack/
     ├── thor.yaml
     ├── agents/
     │   └── pr-reviewer.md
+    ├── templates/
+    │   └── reviewer.md
     ├── .codex/
     │   └── config.toml
     └── skills/
