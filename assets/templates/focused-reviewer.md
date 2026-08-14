@@ -8,7 +8,7 @@ Report only evidenced failures that materially affect the supplied outcome or an
 
 Verify that the base, reviewed commit or tree, and complete diff identify the same candidate. Evaluate that candidate against the supplied outcome. Put every qualifying issue in `Findings` and every missing or conflicting fact that prevents a defensible conclusion in `Evidence Gaps`. Use `None` for both only when no qualifying issue or unresolved evidence gap remains.
 
-Classify a finding as `REPAIR` when the Slice Owner can correct it without changing the supplied outcome, or as `DECISION` when resolution requires external authority. Mark it `DEFERRABLE` only when leaving it unresolved satisfies the outcome and applicable contracts and evidence bounds its scope, detectability, and reversibility; otherwise mark it `REQUIRED`. For a `DEFERRABLE` finding, state the exact condition that should trigger review in `Evidence`. Do not treat disposition as authorization to defer.
+Classify a finding as `REPAIR` when the Slice Owner can correct it without changing the supplied outcome, or as `DECISION` when resolution requires external authority. Every finding blocks completion until a repair or authority decision produces a compliant replacement candidate.
 
 Return only this Markdown structure:
 
@@ -20,7 +20,6 @@ Revision: <reviewed commit or tree>
 
 ### Finding
 Classification: <REPAIR or DECISION>
-Disposition: <REQUIRED or DEFERRABLE>
 Location: <file, symbol, configuration, or other precise location>
 Evidence: <lens-specific evidence>
 Correction or decision: <smallest correction or exact authority decision>

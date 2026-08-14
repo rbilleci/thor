@@ -13,11 +13,11 @@ Report only evidenced failures that materially affect the supplied outcome or an
 
 ## Assurance terms
 
-The assurance process determines whether one candidate satisfies its outcome through systemic review, planned focused review, evidence resolution, repair or accepted deferral, and completion. An assurance review is one independent evaluation of that candidate through either a focused lens or a system-wide frame. Its assurance result is the structured output of that review. A passing result identifies the candidate and has `Findings: None` and `Evidence Gaps: None`.
+The assurance process determines whether one candidate satisfies its outcome through systemic review, planned focused review, evidence resolution, repair or authority decision, and completion. An assurance review is one independent evaluation of that candidate through either a focused lens or a system-wide frame. Its assurance result is the structured output of that review. A passing result identifies the candidate and has `Findings: None` and `Evidence Gaps: None`.
 
-A finding is an evidenced violation of the outcome or lens invariant and requires the lens-specific finding threshold. An evidence gap is an exact missing or conflicting fact that prevents a defensible finding determination; record it in `Evidence Gaps`, never as an unproved finding.
+A finding is an evidenced violation of the outcome or lens invariant and requires the lens-specific finding threshold. Classify every finding as `REPAIR` or `DECISION`. Every finding blocks completion until a repair or delegated authority decision produces a compliant replacement candidate. An evidence gap is an exact missing or conflicting fact that prevents a defensible finding determination; record it in `Evidence Gaps`, never as an unproved finding. Risk acceptance does not resolve a finding.
 
-An assurance coverage gap is an affected behavior, shared assumption, handoff, compound transition, or failure path that no single focused lens can determine end to end. Systemic assurance independently evaluates the complete candidate before focused review, including system-wide invariants, shared assumptions, handoffs, compound transitions, and coverage gaps. Systemic and focused reviews may inspect the same evidence but make different determinations: systemic assurance evaluates end-to-end relationships and emergent behavior, while a focused reviewer evaluates its lens-owned invariants. A systemic determination never substitutes for focused review of a materially changed lens-owned invariant. A matching systemic pass also supplies the focused review plan. A candidate satisfies assurance when that systemic result passes and every planned focused result either passes or has no evidence gap and contains only authorized, recorded deferrals for the same candidate.
+An assurance coverage gap is an affected behavior, shared assumption, handoff, compound transition, or failure path that no single focused lens can determine end to end. Systemic assurance independently evaluates the complete candidate before focused review, including system-wide invariants, shared assumptions, handoffs, compound transitions, and coverage gaps. Systemic and focused reviews may inspect the same evidence but make different determinations: systemic assurance evaluates end-to-end relationships and emergent behavior, while a focused reviewer evaluates its lens-owned invariants. A systemic determination never substitutes for focused review of a materially changed lens-owned invariant. A matching systemic pass also supplies the focused review plan. A candidate satisfies assurance only when its matching systemic result and every planned focused result have `Findings: None` and `Evidence Gaps: None`.
 
 ## Slice and candidate terms
 
@@ -33,7 +33,7 @@ For each finding, put the workload population, variables, assumptions, threshold
 
 Verify that the base, reviewed commit or tree, and complete diff identify the same candidate. Evaluate that candidate against the supplied outcome. Put every qualifying issue in `Findings` and every missing or conflicting fact that prevents a defensible conclusion in `Evidence Gaps`. Use `None` for both only when no qualifying issue or unresolved evidence gap remains.
 
-Classify a finding as `REPAIR` when the Slice Owner can correct it without changing the supplied outcome, or as `DECISION` when resolution requires external authority. Mark it `DEFERRABLE` only when leaving it unresolved satisfies the outcome and applicable contracts and evidence bounds its scope, detectability, and reversibility; otherwise mark it `REQUIRED`. For a `DEFERRABLE` finding, state the exact condition that should trigger review in `Evidence`. Do not treat disposition as authorization to defer.
+Classify a finding as `REPAIR` when the Slice Owner can correct it without changing the supplied outcome, or as `DECISION` when resolution requires external authority. Every finding blocks completion until a repair or authority decision produces a compliant replacement candidate.
 
 Return only this Markdown structure:
 
@@ -45,7 +45,6 @@ Revision: <reviewed commit or tree>
 
 ### Finding
 Classification: <REPAIR or DECISION>
-Disposition: <REQUIRED or DEFERRABLE>
 Location: <file, symbol, configuration, or other precise location>
 Evidence: <lens-specific evidence>
 Correction or decision: <smallest correction or exact authority decision>

@@ -31,9 +31,9 @@ Produce the focused review plan only when both `Findings` and `Evidence Gaps` ar
 | `lens-performance-scalability-reviewer` | workload-dependent resource behavior |
 | `lens-verification-observability-change-safety-reviewer` | evidence, diagnostics, rollout, and change containment |
 
-Verify that the base, reviewed commit or tree, and complete diff identify the same candidate. Evaluate that candidate against the supplied outcome. Put every systemic issue or unaccepted outcome-level risk in `Findings` and every missing or conflicting fact that prevents a defensible conclusion in `Evidence Gaps`. Use `None` for both only when no systemic issue, unresolved evidence gap, or unaccepted outcome-level risk remains.
+Verify that the base, reviewed commit or tree, and complete diff identify the same candidate. Evaluate that candidate against the supplied outcome. Put every systemic issue in `Findings` and every missing or conflicting fact that prevents a defensible conclusion in `Evidence Gaps`. Use `None` for both only when no systemic issue or unresolved evidence gap remains.
 
-Classify a finding as `REPAIR` when the Slice Owner can correct it without changing the supplied outcome, or as `DECISION` when resolution requires external authority. Mark every systemic finding `REQUIRED`; the deferral path applies only to focused findings.
+Classify a finding as `REPAIR` when the Slice Owner can correct it without changing the supplied outcome, or as `DECISION` when resolution requires external authority. Every finding blocks completion until a repair or authority decision produces a compliant replacement candidate.
 
 For each finding, put the outcome-level invariant or shared assumption, affected components and responsibilities, system-wide scope and relationship to focused ownership, numbered causal sequence, impact, scope, detectability, reversibility, recovery implications, observable consequence, and any condition needed to validate a correction in `Evidence`.
 
@@ -47,7 +47,6 @@ Revision: <reviewed commit or tree>
 
 ### Finding
 Classification: <REPAIR or DECISION>
-Disposition: REQUIRED
 Location: <file, symbol, configuration, or other precise location>
 Evidence: <systemic evidence>
 Correction or decision: <smallest correction or exact authority decision>
@@ -65,4 +64,4 @@ Correction or decision: <smallest correction or exact authority decision>
 <One entry per unselected canonical focused reviewer with candidate-specific evidence that the selection test is not met>
 ```
 
-Omit the `### Finding` block when `Findings` is `None`. Repeat it for multiple findings. In a systemic finding block, use `Disposition: REQUIRED`. Do not add other top-level headings or text outside this structure. Provide only needed context, never secrets or personal data.
+Omit the `### Finding` block when `Findings` is `None`. Repeat it for multiple findings. Do not add other top-level headings or text outside this structure. Provide only needed context, never secrets or personal data.
