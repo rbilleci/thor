@@ -1,66 +1,26 @@
 ---
 name: dispatch-work
-description: Delegate substantial repository changes into bounded, outcome-based slices owned end to end by spawned Slice Owners. Use only from the primary or root agent acting as Work Dispatcher for substantial single-slice, multi-slice, parallel, or long-running work. Do not use from a Slice Owner or reviewer.
+description: Use only in the main conversation when the user asks to handle a multi-part implementation end to end, finishing and validating each part before starting the next, or when the work naturally divides into independently deliverable changes.
 ---
 
 # Dispatch Work
 
-Act as the Work Dispatcher. Assign complete outcomes; do not coordinate routine implementation or review activity.
+Act as the Work Dispatcher. Use the existing checkout. Set the assigned branch to its current branch. Assign one active slice to one Slice Owner, wait for its terminal result or complete confirmed owner-loss handling, and only then start another slice. Do not coordinate implementation, design resolution, validation, selection, auditing, repair, or re-review.
 
-## Establish the delivery contract
+## Delivery contract
 
-1. State the overall outcome, constraints, non-goals, and verifiable completion criteria.
-2. Inspect enough repository context to identify coherent ownership boundaries.
-3. Divide work only when slices can be described as independently verifiable outcomes.
-4. Give only one Slice Owner write responsibility for a file or tightly coupled area at a time.
-5. Keep small or strongly coupled changes with one owner instead of manufacturing parallelism.
+Define an `ASSIGNMENT` containing the requirements baseline—an independently verifiable outcome, scope, non-goals, constraints, and acceptance criteria—plus decision authority, dependencies, base commit, assigned branch, and checkout. Use a new slice identifier. Before sending the `ASSIGNMENT`, verify that the current branch equals the assigned branch, `HEAD` equals the base commit, and `git status --porcelain` is empty. If a check fails, return `BLOCKED` to the user without altering the checkout. Launch one `slicer` subagent as the Slice Owner and make it the checkout’s only writer. Do not create another Git worktree or branch.
 
-For every slice provide:
+Send one `ASSIGNMENT` that names the new slice identifier to the Slice Owner. From the retained Slice Owner, accept zero or more `UPDATE` messages followed by one `TERMINAL`, provided each inbound message names the retained active slice identifier. Accept an `UPDATE` only for candidate freeze or review start, repair start, a blocker or decision, or a user-requested status.
 
-- identifier and intended outcome;
-- included and excluded scope;
-- relevant requirements and repository context;
-- authority boundaries and decisions that require escalation;
-- dependencies on other slices;
-- validation and acceptance criteria;
-- expected integration point or base revision; and
-- instruction to use `$deliver-slice`, send best-effort non-terminal progress updates for long-running work, and return one terminal report.
+Retain the active slice identifier, Slice Owner, checkout, base commit, assigned branch, and dependencies until accepting `TERMINAL` or until the platform confirms that the Slice Owner cannot continue and the original admission checks pass. Clear the assignment before sending another `ASSIGNMENT`. Do not persist workflow state or reports.
 
-## Delegate ownership
+Accept a `TERMINAL` only when its status is `COMPLETE`, `DECISION_REQUIRED`, `BLOCKED`, or `FAILED` and it certifies that neither the retained Slice Owner nor work started for the slice can write to the checkout. Verify each `TERMINAL` against the active assignment. Require a candidate commit for `COMPLETE`; verify any candidate reported for another status. Route each non-complete `TERMINAL` by status. For `DECISION_REQUIRED`, ask the user for the stated decision. For `BLOCKED`, report the blocking condition and what must change to clear it. For `FAILED`, report the completion criterion that did not converge or proved infeasible and its supporting evidence.
 
-Spawn `slice_owner` for each ready slice. The Slice Owner owns implementation, validation, all ten first-tier reviews, the systemic review, repairs, and re-review. Do not relay routine findings between the owner and reviewers.
+Keep the active Slice Owner running until it returns `TERMINAL`. Continue waiting while it runs, and continue the same Slice Owner when the platform can resume it. Do not treat elapsed time, absence of an `UPDATE`, or a resumable platform pause as owner loss.
 
-Run independent slices concurrently only when their write scopes do not overlap. Use separate worktrees when concurrent owners would otherwise share a checkout. Sequence dependent or overlapping slices.
+If the platform reports that the retained Slice Owner cannot continue the active slice, request a platform stop for that owner and slice. Start no other writer until the platform confirms that the retained Slice Owner and all work it started, directly or indirectly, can no longer write to the checkout. Treat any other confirmation as missing, return `BLOCKED`, and preserve the checkout. If the Slice Owner returns `TERMINAL` before confirmation, handle that result and ignore later stop confirmation. Otherwise, after confirmation, rerun the original admission checks. If they pass, clear the assignment and assign the outstanding outcome as a new slice. If they fail, return `BLOCKED` with the failed check and preserve the checkout.
 
-Treat integration and finalization as another owned slice. Assign an Integration Owner through `slice_owner`; do not absorb its implementation or review loop into the Work Dispatcher.
+## Terminal handling
 
-## Observe progress without taking ownership
-
-For work expected to run for roughly three minutes or more, ask the Slice Owner for concise progress updates at safe boundaries. Treat `PROGRESS` updates as informational rather than durable workflow state. Forward only material `ATTENTION` items upward; routine implementation, review, and repair activity remains with the Slice Owner.
-
-Do not ask a worker to interrupt a running command, write, transaction, migration, deployment, or external side effect merely to report status. If a runtime cannot deliver a non-terminal message, request status when appropriate without cancelling the worker.
-
-## Process only terminal reports
-
-Accept four outcomes:
-
-- `COMPLETE`: the assigned outcome is implemented and validated; all ten lens reviewers passed the same final candidate; systemic assurance approved it.
-- `DECISION_REQUIRED`: progress requires authority outside the assignment, including new scope, architecture, risk acceptance, or incompatible requirements.
-- `BLOCKED`: an external dependency prevents progress.
-- `FAILED`: the owner cannot produce a defensible candidate or the repair loop is not converging.
-
-Resolve decisions and blockers, then return the slice to an owner with an amended delivery contract. Do not request raw review transcripts unless investigating a disputed terminal report.
-
-Progress updates do not create a terminal state, change candidate certification, or substitute for a terminal report.
-
-## Preserve long-running state simply
-
-Use the work item, branch or worktree, commits, pull request, CI results, and explicit user decisions as durable state. Record at most the terminal status and exact candidate identity in an existing authoritative work item or pull request. On resume, reconstruct status from those sources.
-
-Unless a terminal result for the exact candidate is durably recorded, treat intermediate validation and review state as untrusted. Assign an owner to rerun validation, all ten lens reviews, and systemic assurance rather than relying on compacted or partial thread history.
-
-Do not create workflow ledgers, agent mailboxes, lock files, review-result files, digest chains, or hidden protocol state. Do not require agents to maintain a lifecycle state machine.
-
-## Finish
-
-Make only `COMPLETE` slices eligible for integration. Assign integration and finalization to an Integration Owner through `slice_owner`. Verify terminal reports against the assigned boundaries and completion criteria without performing implementation or an unreviewed merge repair in the Work Dispatcher thread.
+Before accepting `COMPLETE`, require a clean checkout. Use the candidate commit as the next `ASSIGNMENT`'s base commit, retaining the checkout and assigned branch. After accepting `DECISION_REQUIRED` or `FAILED`, send no further `ASSIGNMENT` until the user authorizes the next action. After accepting `BLOCKED`, send no further `ASSIGNMENT` until the dispatcher verifies objective evidence that every reported blocking condition cleared or the user authorizes an alternative that avoids those conditions. User authorization cannot waive active-assignment retention or unresolved owner-loss confirmation. Require the checkout to pass the admission checks before any further `ASSIGNMENT`. Start follow-up as a new slice.

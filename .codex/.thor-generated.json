@@ -2,6 +2,8 @@
   "format": "thor-generated-output/v1",
   "output": "codex-agents",
   "paths": [
+    "agents/assurance-scope-selector.toml",
+    "agents/design-contract-resolver.toml",
     "agents/lens-architecture-boundaries-reviewer.toml",
     "agents/lens-concurrency-distributed-systems-reviewer.toml",
     "agents/lens-data-integrity-lifecycle-reviewer.toml",

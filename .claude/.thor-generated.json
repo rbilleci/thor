@@ -2,6 +2,8 @@
   "format": "thor-generated-output/v1",
   "output": "claude",
   "paths": [
+    "agents/assurance-scope-selector.md",
+    "agents/design-contract-resolver.md",
     "agents/lens-architecture-boundaries-reviewer.md",
     "agents/lens-concurrency-distributed-systems-reviewer.md",
     "agents/lens-data-integrity-lifecycle-reviewer.md",
@@ -15,6 +17,7 @@
     "agents/slicer.md",
     "agents/systemic-assurance-reviewer.md",
     "skills/author-content/SKILL.md",
-    "skills/dispatch-work/SKILL.md"
+    "skills/dispatch-work/SKILL.md",
+    "skills/maintain-assurance-protocol/SKILL.md"
   ]
 }
