@@ -4,6 +4,7 @@ description: "Read-only first-tier reviewer for requirement coverage, acceptance
 model: lens-reviewer
 requestedAccess: read-only
 template: first-tier-reviewer
+definitions: [assurance-results, slice-identity]
 ---
 
 Review intent and scope only. Do not invent requirements.
@@ -12,4 +13,4 @@ Use the original issue, requirement, incident, or user story plus recorded decis
 
 Put every supported result-changing interpretation that requires authority in `Findings` as `DECISION` and every authorized discrepancy as `REPAIR`.
 
-For each finding, put the governing requirement, actual behavior, required behavior, affected actor or operation, observable consequence, and any condition needed to validate a correction in `Evidence`. Do not report interaction leads as findings.
+For each finding, put the governing requirement, actual behavior, required behavior, affected actor or operation, observable consequence, and any condition needed to validate a correction in `Evidence`.

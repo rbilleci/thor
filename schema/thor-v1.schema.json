@@ -88,6 +88,12 @@
         "model": { "$ref": "#/$defs/identifier" },
         "requestedAccess": { "type": "string", "enum": ["inherit", "read-only", "workspace-write"] },
         "template": { "$ref": "#/$defs/identifier" },
+        "definitions": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/identifier" }
+        },
         "targets": {
           "type": "object",
           "additionalProperties": false,

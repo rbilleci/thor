@@ -33,7 +33,7 @@ Thor uses two deliberately separate repository roles:
 | Repository | Contents | Releases |
 |---|---|---|
 | `github.com/<org>/thor` | The Rust workspace, the canonical schemas, bootstrap scripts, and CI | Native `thor` binaries, `SHA256SUMS`, signed CLI release manifest, and bootstrap scripts. |
-| `github.com/<org>/<agent-pack>` | Only `assets/thor.yaml`, `assets/agents/`, optional `assets/templates/`, `assets/skills/`, pack tests, and pack CI configuration | A signed `thor-bundle-<pack-version>.zip`. It contains no CLI binary or installer script. |
+| `github.com/<org>/<agent-pack>` | Only `assets/thor.yaml`, `assets/agents/`, optional `assets/definitions/` and `assets/templates/`, `assets/skills/`, pack tests, and pack CI configuration | A signed `thor-bundle-<pack-version>.zip`. It contains no CLI binary or installer script. |
 
 The agent-pack CI uses a version-pinned `thor-build` binary from the Thor tool repository. Before it executes that binary, it verifies the signed Thor tool release manifest against the Thor release public key pinned in the pack workflow, then verifies the selected `thor-build` asset's SHA-256 digest from that manifest. End users only download the native `thor` CLI and agent-pack bundles.
 
@@ -41,7 +41,7 @@ The agent-pack CI uses a version-pinned `thor-build` binary from the Thor tool r
 
 ```text
 Agent-pack repository
-  assets/thor.yaml + assets/agents/<id>.md + assets/templates/<id>.md + assets/skills/<name>/SKILL.md
+  assets/thor.yaml + assets/agents/<id>.md + assets/definitions/<id>.md + assets/templates/<id>.md + assets/skills/<name>/SKILL.md
               |
               | CI: validate -> transform -> snapshot-test -> package
               v
@@ -65,7 +65,7 @@ Local `thor` binary
 The source repository and the release artifact are separate concerns:
 
 - **Source** is human-authored YAML and portable standard skills.
-- **Release artifact** contains generated agent files, unmodified skills, and an inventory with file digests.
+- **Release artifact** contains generated agent files, expanded `SKILL.md` files, byte-identical auxiliary skill files, and an inventory with file digests.
 - **Installer state** records exactly what Thor installed. It is not a second configuration source.
 
 ## Agent-pack source repository layout
@@ -77,9 +77,11 @@ agent-pack/
 │   ├── agents/                        # One portable source file per subagent
 │   │   ├── pr-reviewer.md
 │   │   └── focused-fixer.md
+│   ├── definitions/                   # Optional reusable build-time instruction bundles
+│   │   └── review-terms.md
 │   ├── templates/                     # Optional build-time instruction wrappers
 │   │   └── reviewer.md
-│   └── skills/                        # Agent Skills open-standard source, copied as-is
+│   └── skills/                        # Agent Skills source; only SKILL.md is preprocessed
 │       └── pr-checklist/
 │           ├── SKILL.md
 │           └── references/
@@ -89,7 +91,7 @@ agent-pack/
 
 The Thor tool repository has the separate Rust workspace described in [Rust implementation](#rust-implementation).
 
-`assets/skills/<name>/SKILL.md` is a normal Agent Skills directory: `name` and `description` frontmatter followed by Markdown instructions, with optional `scripts/`, `references/`, and `assets/`. Thor does not translate this content. Claude Code and Codex both use the standard; neither target-specific skill extension is allowed in a portable Thor pack. Thor packages and installs every file below the skill directory, but never executes a bundled script during bootstrap, init, update, or uninstall; a harness may execute such a script only later under its own policy.
+`assets/skills/<name>/SKILL.md` is a normal Agent Skills directory: `name` and `description` frontmatter followed by Markdown instructions, with optional `scripts/`, `references/`, and `assets/`. Claude Code and Codex both use the standard; neither target-specific skill extension is allowed in a portable Thor pack. Thor preprocesses only `SKILL.md` to expand selected definition bundles, then packages and installs it as a standard-compatible skill. Thor copies every other skill file as opaque bytes and never executes a bundled script during bootstrap, init, update, or uninstall; a harness may execute a script only later under its own policy.
 
 The standard's optional `allowed-tools` field has differing host support. Treat it as advisory and do not use it to establish a security boundary; effective access control belongs to the invoking harness's sandbox and approval policy, with Thor's requested-access profile only supplying a default.
 
@@ -98,8 +100,10 @@ The standard's optional `allowed-tools` field has differing host support. Treat 
 Thor has these source inputs:
 
 - `assets/thor.yaml` is the versioned package manifest. It contains package metadata plus global logical-model mappings. Each target entry resolves both a harness model and a Codex-aligned effort.
-- `assets/agents/<id>.md` defines one subagent. Its YAML frontmatter is the agent configuration; its Markdown body is either the complete instruction text or the agent-specific text inserted into its declared template.
-- `assets/templates/<id>.md` is an optional build-time instruction wrapper. It contains exactly one `{{agent_instructions}}` slot and no other template slots. Thor derives the path from the agent's `template` identifier, inserts the non-empty agent body, and sends only the expanded instructions to target renderers.
+- `assets/agents/<id>.md` defines one subagent. Its YAML frontmatter is the agent configuration; its Markdown body is either the complete instruction text or the agent-specific text inserted into its declared template. The optional `definitions` list selects reusable definition bundles by identifier.
+- `assets/definitions/<id>.md` is a UTF-8 Markdown definition bundle. Thor derives its path from the validated identifier, rejects empty, linked, missing, or nested-definition sources, and expands selected bundles in declaration order. Definition bundles are build-time source only and are never packaged as separate files.
+- `assets/templates/<id>.md` is an optional build-time instruction wrapper. It contains exactly one `{{agent_instructions}}` slot. A direct agent that selects definitions requires exactly one `{{definition_bundles}}` marker in its instructions; an agent using a template requires that marker in its template. Thor inserts the non-empty agent body and selected bundles, rejects every other slot, and sends only expanded instructions to target renderers.
+- `assets/skills/<name>/SKILL.md` may select bundles with one exact source-only directive, `<!-- thor:definitions: <id>[, <id>...] -->`, and requires exactly one `{{definition_bundles}}` marker. Thor removes the directive and marker while inserting the selected bundles before target copy or bundle packaging. The generated file retains Agent Skills frontmatter and Markdown instructions; Thor copies every other file below the skill directory byte-for-byte.
 - `assets/.claude/**` and `assets/.codex/**` are optional target-scoped static files. Thor copies their opaque bytes to the identical relative path below the matching harness root. Static files must not overlap generated `agents/` paths or Claude `skills/` paths.
 
 Dogfood transformation overwrites each static source path but does not remove a static output after its source file disappears. Release installation tracks static payloads in the normal file inventory, so an update that removes a static payload removes its previously installed file.
@@ -178,7 +182,8 @@ Thor's portable agent and skill identifier rule is `[a-z][a-z0-9-]{0,63}`. Every
 | Agent files | Every `assets/agents/*.md` file must have YAML frontmatter and a non-empty Markdown body. No agent may be defined in `assets/thor.yaml`. |
 | Agent `id` | Required; lowercase letters, digits, and hyphens; starts with a letter; 1–64 characters. It must equal the filename stem. |
 | `description`, `model`, `requestedAccess` | Required, non-empty. Descriptions include the role and delegation trigger; `model` must reference the global catalog. |
-| `template` | Optional Thor identifier. Thor reads `assets/templates/<template>.md`, which must be a regular UTF-8 file containing exactly one `{{agent_instructions}}` slot and no other slots. Templates are expanded during source loading and are not packaged. |
+| `template` | Optional Thor identifier. Thor reads `assets/templates/<template>.md`, which must be a regular UTF-8 file containing exactly one `{{agent_instructions}}` slot and, when the agent selects definitions, exactly one `{{definition_bundles}}` marker. Templates are expanded during source loading and are not packaged. |
+| `definitions` | Optional non-empty, unique list of Thor identifiers. Thor derives each path as `assets/definitions/<id>.md`, expands bundles in list order, and rejects unsafe, linked, missing, duplicate, empty, or nested-definition sources. An agent that selects bundles requires exactly one `{{definition_bundles}}` marker. |
 | `instructions` | The Markdown body; required and non-empty. Thor either transforms it directly or inserts it into the declared template before producing a Claude Code Markdown body and Codex `developer_instructions`. |
 | Model target mapping | Every selected target in every model class requires non-empty `model` and an effort of `low`, `medium`, `high`, `xhigh`, or `max`. |
 | `requestedAccess` | One of `inherit`, `read-only`, or `workspace-write`. It is an initial request to the harness, never a security guarantee; parent policy and live approvals can be more restrictive or permissive. |
@@ -207,7 +212,7 @@ Agent-specific skill preloading is excluded from the v1 contract. Claude can pre
 |---|---|---|
 | `id` | YAML `name`; `.claude/agents/<id>.md` | TOML `name`; `.codex/agents/<id>.toml` |
 | `description` | YAML `description` | TOML `description` |
-| Expanded `instructions` | Markdown after YAML frontmatter | `developer_instructions` multiline TOML string |
+| Expanded `instructions` and definition bundles | Markdown after YAML frontmatter | `developer_instructions` multiline TOML string |
 | Model reference | Resolve `spec.models.<model-id>.targets.claude.model` into `model` and `.effort` into YAML `effort` | Resolve `spec.models.<model-id>.targets.codex.model` into `model` and `.effort` into `model_reasoning_effort` |
 | `requestedAccess: inherit` | Omit tools and permission mode; parent configuration applies | Omit `sandbox_mode`; parent configuration applies |
 | `requestedAccess: read-only` | Request `permissionMode: plan` and emit the fixed allowlist `Read, Grep, Glob` | Request `sandbox_mode = "read-only"` |
@@ -268,10 +273,10 @@ When adding a new harness, implement a `TargetAdapter`, add `{ model, effort }` 
 The pack and CLI have independent release pipelines. An agent-pack release runs on a protected tag, for example `v1.2.0`:
 
 1. Download the exact version-pinned Thor tool release. Verify its signed release manifest with the Thor public key pinned in the pack workflow, then verify the named `thor-build` asset's SHA-256 digest before executing it.
-2. Parse `assets/thor.yaml` and every `assets/agents/*.md`, validate and expand any referenced instruction template, and resolve each model's target model/effort mapping. There is no agent inheritance or default resolution.
-3. Validate every `assets/skills/*/SKILL.md` against the Agent Skills standard and validate the complete skill tree for portable packaging: its directory basename and `SKILL.md` `name` must match the Thor identifier rule; all paths must be normalized relative ASCII-safe paths; and every entry must be a regular file or directory, never a symlink, hard link, device, or FIFO.
+2. Parse `assets/thor.yaml` and every `assets/agents/*.md`, validate and expand any referenced definition bundle and instruction template, and resolve each model's target model/effort mapping. There is no agent inheritance or default resolution.
+3. Validate every `assets/skills/*/SKILL.md` against the Agent Skills standard, expand its selected definition bundles, and validate the complete skill tree for portable packaging: its directory basename and `SKILL.md` `name` must match the Thor identifier rule; all paths must be normalized relative ASCII-safe paths; and every entry must be a regular file or directory, never a symlink, hard link, device, or FIFO.
 4. Transform each independently defined agent for `claude` and `codex`; compare to approved golden snapshots and run target syntax checks where practical.
-5. Copy complete skill directory trees unchanged, calculate SHA-256 digests, create `thor-bundle-1.2.0.zip`, and produce a detached, versioned Ed25519 signature over the exact archive bytes using the pack's CI-held key.
+5. Copy each expanded `SKILL.md` and every other skill file byte-for-byte, calculate SHA-256 digests, create `thor-bundle-1.2.0.zip`, and produce a detached, versioned Ed25519 signature over the exact archive bytes using the pack's CI-held key.
 6. Publish only the immutable bundle and its detached signature to the pack's GitHub Release.
 
 The Thor tool pipeline builds, tests, signs, and publishes the native `thor` binaries and bootstrap assets in its own release. Pack CI does not build, package, or publish an installer.
@@ -415,7 +420,7 @@ does not retain an intermediate `dist/` tree.
 |---|---|
 | `PackParser` | Parses YAML and Markdown frontmatter, validates JSON Schema, enforces filename/identity rules, and resolves each model's target model/effort mapping. |
 | `TargetAdapter` | One small implementation each for Claude Code and Codex; maps a resolved portable agent to target text. It is a compile-time extension point, not a runtime plugin system. |
-| `BundleService` | Copies standard skills unchanged, writes the artifact manifest, calculates payload digests, and creates the bundle ZIP. |
+| `BundleService` | Expands `SKILL.md`, copies other skill files byte-for-byte, writes the artifact manifest, calculates payload digests, and creates the bundle ZIP. |
 
 ### `thor`: native local lifecycle CLI
 

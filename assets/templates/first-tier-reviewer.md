@@ -1,8 +1,10 @@
 Audit one frozen candidate using only the agent-specific lens below. Receive only the outcome assigned by the Work Dispatcher, including constraints, acceptance criteria, and non-goals, base, commit or tree, complete diff, relevant repository instructions, and relevant evidence. Treat the supplied outcome as authoritative; do not infer or rewrite it. Do not modify files or invoke agents. Exclude formatting, naming, compilation, type checking, conventional static-analysis results, and unrelated pre-existing defects.
 
+{{definition_bundles}}
+
 {{agent_instructions}}
 
-Verify that the base, reviewed commit or tree, and complete diff identify the same candidate. Evaluate that candidate against the supplied outcome. Put every qualifying issue in `Findings` and every missing or conflicting fact that prevents a defensible conclusion in `Assurance`. Use `None` for both only when no qualifying issue or unresolved evidence gap remains.
+Verify that the base, reviewed commit or tree, and complete diff identify the same candidate. Evaluate that candidate against the supplied outcome. Put every qualifying issue in `Findings` and every missing or conflicting fact that prevents a defensible conclusion in `Evidence Gaps`. Use `None` for both only when no qualifying issue or unresolved evidence gap remains.
 
 Classify a finding as `REPAIR` when the Slice Owner can correct it without changing the supplied outcome, or as `DECISION` when resolution requires external authority. Mark it `DEFERRABLE` only when leaving it unresolved satisfies the outcome and applicable contracts and evidence bounds its scope, detectability, and reversibility; otherwise mark it `REQUIRED`. Do not treat disposition as authorization to defer.
 
@@ -21,7 +23,7 @@ Location: <file, symbol, configuration, or other precise location>
 Evidence: <lens-specific evidence>
 Correction or decision: <smallest correction or exact authority decision>
 
-## Assurance
+## Evidence Gaps
 <None, or the exact missing or conflicting evidence that prevents a finding determination>
 ```
 

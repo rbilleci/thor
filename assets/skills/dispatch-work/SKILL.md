@@ -5,6 +5,10 @@ description: Use only in the main conversation when the user asks to handle a mu
 
 # Dispatch Work
 
+<!-- thor:definitions: slice-identity -->
+
+{{definition_bundles}}
+
 Act as the Work Dispatcher. Use the existing checkout. Set the assigned branch to its current branch. Assign one active slice to one Slice Owner, wait for its terminal result or complete confirmed owner-loss handling, and only then start another slice. Do not coordinate implementation, design resolution, validation, selection, auditing, repair, or re-review.
 
 ## Delivery contract

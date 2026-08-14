@@ -19,6 +19,9 @@ pub const API_VERSION: &str = "thor/v1alpha1";
 pub const KIND: &str = "AgentPack";
 pub const SCHEMA: &str = include_str!("../../../schema/thor-v1.schema.json");
 const AGENT_INSTRUCTIONS_SLOT: &str = "{{agent_instructions}}";
+const DEFINITION_BUNDLES_SLOT: &str = "{{definition_bundles}}";
+const SKILL_DEFINITION_DIRECTIVE_PREFIX: &str = "<!-- thor:definitions: ";
+const SKILL_DEFINITION_DIRECTIVE_SUFFIX: &str = " -->";
 
 pub type Result<T> = std::result::Result<T, ThorError>;
 
@@ -137,6 +140,8 @@ pub struct AgentFrontmatter {
     pub requested_access: RequestedAccess,
     pub template: Option<String>,
     #[serde(default)]
+    pub definitions: Vec<String>,
+    #[serde(default)]
     pub targets: AgentTargets,
 }
 
@@ -248,6 +253,7 @@ impl SourcePack {
         let root = root.as_ref();
         let manifest_path = root.join("thor.yaml");
         let manifest = parse_package_file(&manifest_path)?;
+        validate_definition_sources(root)?;
         let agents_dir = root.join("agents");
         ensure_real_directory(&agents_dir, "agents directory")?;
         let entries = fs::read_dir(&agents_dir).map_err(|source| ThorError::Read {
@@ -272,7 +278,7 @@ impl SourcePack {
                 return validation(entry.path(), "agents/ may contain only Markdown files");
             }
             let mut agent = parse_agent_file(entry.path())?;
-            expand_agent_template(root, &mut agent)?;
+            expand_agent_instructions(root, &mut agent)?;
             agents.push(agent);
         }
         if agents.is_empty() {
@@ -368,35 +374,202 @@ pub fn parse_agent_file(path: impl AsRef<Path>) -> Result<AgentDefinition> {
     })
 }
 
-fn expand_agent_template(root: &Path, agent: &mut AgentDefinition) -> Result<()> {
-    let Some(template_id) = agent.frontmatter.template.as_deref() else {
-        return Ok(());
+fn expand_agent_instructions(root: &Path, agent: &mut AgentDefinition) -> Result<()> {
+    let definition_bundles =
+        load_definition_bundles(root, &agent.source_path, &agent.frontmatter.definitions)?;
+    let (instructions, instruction_origin, instruction_owner) = if let Some(template_id) =
+        agent.frontmatter.template.as_deref()
+    {
+        validate_identifier(&agent.source_path, "agent template", template_id)?;
+
+        let templates_dir = root.join("templates");
+        ensure_real_directory(&templates_dir, "templates directory")?;
+        let template_path = templates_dir.join(format!("{template_id}.md"));
+        ensure_regular_source_file(&template_path, "agent template")?;
+        let template = read_utf8(&template_path)?;
+
+        let slot_count = template.match_indices(AGENT_INSTRUCTIONS_SLOT).count();
+        if slot_count != 1 {
+            return validation(
+                &template_path,
+                format!("agent template must contain exactly one {AGENT_INSTRUCTIONS_SLOT} slot"),
+            );
+        }
+        let template = template.replacen(AGENT_INSTRUCTIONS_SLOT, agent.instructions.trim(), 1);
+        (
+            expand_definition_bundles(
+                &template_path,
+                &template,
+                &definition_bundles,
+                "agent template",
+            )?,
+            template_path,
+            "agent template",
+        )
+    } else {
+        (
+            expand_definition_bundles(
+                &agent.source_path,
+                &agent.instructions,
+                &definition_bundles,
+                "agent instructions",
+            )?,
+            agent.source_path.clone(),
+            "agent instructions",
+        )
     };
-    validate_identifier(&agent.source_path, "agent template", template_id)?;
 
-    let templates_dir = root.join("templates");
-    ensure_real_directory(&templates_dir, "templates directory")?;
-    let template_path = templates_dir.join(format!("{template_id}.md"));
-    ensure_regular_source_file(&template_path, "agent template")?;
-    let template = read_utf8(&template_path)?;
-
-    let slot_count = template.match_indices(AGENT_INSTRUCTIONS_SLOT).count();
-    if slot_count != 1 {
+    if instructions.contains("{{") || instructions.contains("}}") {
         return validation(
-            &template_path,
-            format!("agent template must contain exactly one {AGENT_INSTRUCTIONS_SLOT} slot"),
+            &instruction_origin,
+            format!(
+                "{instruction_owner} supports only the {AGENT_INSTRUCTIONS_SLOT} and {DEFINITION_BUNDLES_SLOT} slots"
+            ),
         );
     }
-    let template_without_slot = template.replacen(AGENT_INSTRUCTIONS_SLOT, "", 1);
-    if template_without_slot.contains("{{") || template_without_slot.contains("}}") {
-        return validation(
-            &template_path,
-            format!("agent template supports only the {AGENT_INSTRUCTIONS_SLOT} slot"),
-        );
-    }
-
-    agent.instructions = template.replacen(AGENT_INSTRUCTIONS_SLOT, agent.instructions.trim(), 1);
+    agent.instructions = instructions;
     Ok(())
+}
+
+fn load_definition_bundles(
+    root: &Path,
+    source_path: &Path,
+    definition_ids: &[String],
+) -> Result<String> {
+    if definition_ids.is_empty() {
+        return Ok(String::new());
+    }
+
+    let definitions_dir = root.join("definitions");
+    ensure_real_directory(&definitions_dir, "definitions directory")?;
+    let mut seen = BTreeSet::new();
+    let mut bundles = Vec::new();
+    for definition_id in definition_ids {
+        validate_identifier(source_path, "definition bundle", definition_id)?;
+        if !seen.insert(definition_id) {
+            return validation(
+                source_path,
+                format!("duplicate definition bundle {definition_id}"),
+            );
+        }
+        let definition_path = definitions_dir.join(format!("{definition_id}.md"));
+        if matches!(
+            fs::symlink_metadata(&definition_path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        ) {
+            return validation(
+                &definition_path,
+                format!("definition bundle {definition_id} does not exist"),
+            );
+        }
+        ensure_regular_source_file(&definition_path, "definition bundle")?;
+        let definition = read_utf8(&definition_path)?;
+        validate_definition_content(&definition_path, &definition)?;
+        bundles.push(definition.trim().to_owned());
+    }
+    Ok(bundles.join("\n\n"))
+}
+
+fn validate_definition_sources(root: &Path) -> Result<()> {
+    let definitions_dir = root.join("definitions");
+    match fs::symlink_metadata(&definitions_dir) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(ThorError::Read {
+                path: definitions_dir.clone(),
+                source,
+            });
+        }
+    }
+    ensure_real_directory(&definitions_dir, "definitions directory")?;
+    let entries = fs::read_dir(&definitions_dir).map_err(|source| ThorError::Read {
+        path: definitions_dir.clone(),
+        source,
+    })?;
+    let mut names = BTreeMap::new();
+    for entry in entries {
+        let entry = entry.map_err(|source| ThorError::Read {
+            path: definitions_dir.clone(),
+            source,
+        })?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|source| ThorError::Read {
+            path: path.clone(),
+            source,
+        })?;
+        if !file_type.is_file() || path.extension().is_none_or(|extension| extension != "md") {
+            return validation(path, "definitions/ may contain only Markdown files");
+        }
+        let definition_id = path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| ThorError::Validation {
+                path: path.clone(),
+                message: "definition filename must be UTF-8".to_owned(),
+            })?;
+        validate_identifier(&path, "definition filename", definition_id)?;
+        let expected_name = format!("{definition_id}.md");
+        if path.file_name().and_then(|name| name.to_str()) != Some(expected_name.as_str()) {
+            return validation(path, format!("definition filename must be {expected_name}"));
+        }
+        let folded = definition_id.to_ascii_lowercase();
+        if let Some(previous) = names.insert(folded, definition_id.to_owned()) {
+            return validation(
+                path,
+                format!(
+                    "definition bundle collides on a case-insensitive filesystem with {previous}"
+                ),
+            );
+        }
+        ensure_regular_source_file(&path, "definition bundle")?;
+        let definition = read_utf8(&path)?;
+        validate_definition_content(&path, &definition)?;
+    }
+    Ok(())
+}
+
+fn validate_definition_content(path: &Path, definition: &str) -> Result<()> {
+    if definition.trim().is_empty() {
+        return validation(path, "definition bundle must not be empty");
+    }
+    if definition.contains(DEFINITION_BUNDLES_SLOT) || definition.contains("<!-- thor:definitions")
+    {
+        return validation(
+            path,
+            "definition bundles may not include definition bundles",
+        );
+    }
+    Ok(())
+}
+
+fn expand_definition_bundles(
+    path: &Path,
+    text: &str,
+    definition_bundles: &str,
+    owner: &str,
+) -> Result<String> {
+    let marker_count = text.match_indices(DEFINITION_BUNDLES_SLOT).count();
+    if definition_bundles.is_empty() {
+        if marker_count != 0 {
+            return validation(
+                path,
+                format!(
+                    "{owner} has a {DEFINITION_BUNDLES_SLOT} marker but selects no definitions"
+                ),
+            );
+        }
+        return Ok(text.to_owned());
+    }
+    if marker_count != 1 {
+        return validation(
+            path,
+            format!(
+                "{owner} that selects definitions must contain exactly one {DEFINITION_BUNDLES_SLOT} marker"
+            ),
+        );
+    }
+    Ok(text.replacen(DEFINITION_BUNDLES_SLOT, definition_bundles, 1))
 }
 
 pub fn parse_skill_file(path: impl AsRef<Path>) -> Result<SkillDefinition> {
@@ -422,9 +595,70 @@ pub fn parse_skill_file(path: impl AsRef<Path>) -> Result<SkillDefinition> {
     })
 }
 
+/// Expands the Thor-only definition directive in one `SKILL.md` source file.
+/// Every other file in a skill tree remains an opaque byte payload.
+pub fn preprocess_skill_file(root: impl AsRef<Path>, path: impl AsRef<Path>) -> Result<Vec<u8>> {
+    let root = root.as_ref();
+    let path = path.as_ref();
+    parse_skill_file(path)?;
+    let source = read_utf8(path)?;
+    let (_, instructions) = split_frontmatter(path, &source)?;
+    let instructions_offset = source.len() - instructions.len();
+    let (definition_ids, instructions) = extract_skill_definition_directive(path, instructions)?;
+    let definition_bundles = load_definition_bundles(root, path, &definition_ids)?;
+    let instructions = expand_definition_bundles(
+        path,
+        &instructions,
+        &definition_bundles,
+        "skill instructions",
+    )?;
+    Ok(format!("{}{instructions}", &source[..instructions_offset]).into_bytes())
+}
+
+fn extract_skill_definition_directive(
+    path: &Path,
+    instructions: &str,
+) -> Result<(Vec<String>, String)> {
+    let mut definition_ids = None;
+    let mut output = String::new();
+    for line in instructions.split_inclusive('\n') {
+        let content = line_content(line);
+        if content.contains("<!-- thor:definitions") {
+            if !content.starts_with(SKILL_DEFINITION_DIRECTIVE_PREFIX)
+                || !content.ends_with(SKILL_DEFINITION_DIRECTIVE_SUFFIX)
+            {
+                return validation(
+                    path,
+                    "skill definition directive must be exactly <!-- thor:definitions: <id>[, <id>...] -->",
+                );
+            }
+            if definition_ids.is_some() {
+                return validation(path, "skill may declare definition bundles only once");
+            }
+            let value = &content[SKILL_DEFINITION_DIRECTIVE_PREFIX.len()
+                ..content.len() - SKILL_DEFINITION_DIRECTIVE_SUFFIX.len()];
+            let ids = value
+                .split(',')
+                .map(str::trim)
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            if ids.is_empty() || ids.iter().any(|id| id.is_empty()) {
+                return validation(
+                    path,
+                    "skill definition directive must name at least one definition bundle",
+                );
+            }
+            definition_ids = Some(ids);
+        } else {
+            output.push_str(line);
+        }
+    }
+    Ok((definition_ids.unwrap_or_default(), output))
+}
+
 /// Validates portable skill trees and returns their archive payloads in sorted
-/// archive-path order. Scripts and assets are copied as opaque bytes and are
-/// never run by Thor.
+/// archive-path order. Thor preprocesses only each `SKILL.md`; scripts,
+/// references, and assets are copied as opaque bytes and are never run.
 pub fn collect_skill_payloads(skills_root: impl AsRef<Path>) -> Result<BTreeMap<String, Vec<u8>>> {
     let skills_root = skills_root.as_ref();
     if !skills_root.exists() {
@@ -437,6 +671,10 @@ pub fn collect_skill_payloads(skills_root: impl AsRef<Path>) -> Result<BTreeMap<
     if !root_metadata.file_type().is_dir() || root_metadata.file_type().is_symlink() {
         return validation(skills_root, "skills must be a real directory");
     }
+    let source_root = skills_root.parent().ok_or_else(|| ThorError::Validation {
+        path: skills_root.to_path_buf(),
+        message: "skills directory must have a source root".to_owned(),
+    })?;
 
     let mut payloads = BTreeMap::new();
     let mut portable_payload_paths = BTreeMap::new();
@@ -504,10 +742,14 @@ pub fn collect_skill_payloads(skills_root: impl AsRef<Path>) -> Result<BTreeMap<
                         message,
                     },
                 )?;
-                let bytes = fs::read(walked.path()).map_err(|source| ThorError::Read {
-                    path: walked.path().to_path_buf(),
-                    source,
-                })?;
+                let bytes = if walked.path() == skill_file {
+                    preprocess_skill_file(source_root, walked.path())?
+                } else {
+                    fs::read(walked.path()).map_err(|source| ThorError::Read {
+                        path: walked.path().to_path_buf(),
+                        source,
+                    })?
+                };
                 if payloads.insert(archive_path.clone(), bytes).is_some() {
                     return validation(
                         walked.path(),
@@ -1080,6 +1322,166 @@ Review the requested change and report actionable findings only.
     }
 
     #[test]
+    fn expands_selected_definition_bundles_before_both_agent_renderers() {
+        let directory = fixture_pack();
+        fs::create_dir(directory.path().join("templates")).unwrap();
+        fs::create_dir(directory.path().join("definitions")).unwrap();
+        fs::write(
+            directory.path().join("templates/first-tier-reviewer.md"),
+            "Shared prefix.\n\n{{definition_bundles}}\n\n{{agent_instructions}}\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("definitions/assurance-terms.md"),
+            "## Assurance terms\n\nA passing result has no findings or evidence gaps.\n",
+        )
+        .unwrap();
+        let agent_path = directory.path().join("agents/pr-reviewer.md");
+        fs::write(
+            &agent_path,
+            AGENT.replace(
+                "requestedAccess: read-only",
+                "requestedAccess: read-only\ntemplate: first-tier-reviewer\ndefinitions: [assurance-terms]",
+            ),
+        )
+        .unwrap();
+
+        let pack = SourcePack::load(directory.path()).unwrap();
+        let agent = &pack.agents[0];
+        assert!(agent.instructions.contains("## Assurance terms"));
+        assert!(!agent.instructions.contains(DEFINITION_BUNDLES_SLOT));
+        let claude = render_claude(&pack.resolve(agent, Harness::Claude).unwrap());
+        let codex = render_codex(&pack.resolve(agent, Harness::Codex).unwrap()).unwrap();
+        let codex: toml::Value = toml::from_str(&codex).unwrap();
+        assert!(claude.contains("A passing result has no findings or evidence gaps."));
+        assert!(
+            codex["developer_instructions"]
+                .as_str()
+                .unwrap()
+                .contains("A passing result has no findings or evidence gaps.")
+        );
+    }
+
+    #[test]
+    fn expands_definition_bundles_in_declared_order() {
+        let directory = fixture_pack();
+        fs::create_dir(directory.path().join("definitions")).unwrap();
+        fs::write(
+            directory.path().join("definitions/first.md"),
+            "First bundle.\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("definitions/second.md"),
+            "Second bundle.\n",
+        )
+        .unwrap();
+        let agent = AGENT
+            .replace(
+                "requestedAccess: read-only",
+                "requestedAccess: read-only\ndefinitions: [second, first]",
+            )
+            .replace(
+                "Review the requested change and report actionable findings only.",
+                "{{definition_bundles}}\n\nReview the requested change and report actionable findings only.",
+            );
+        fs::write(directory.path().join("agents/pr-reviewer.md"), agent).unwrap();
+
+        let pack = SourcePack::load(directory.path()).unwrap();
+        let instructions = &pack.agents[0].instructions;
+        assert!(instructions.find("Second bundle.") < instructions.find("First bundle."));
+    }
+
+    #[test]
+    fn rejects_invalid_missing_or_duplicate_agent_definition_bundles_and_markers() {
+        for (definitions, instructions, expected) in [
+            (
+                "definitions: [missing]",
+                "{{definition_bundles}}\n\nReview the change.",
+                "definition bundle",
+            ),
+            (
+                "definitions: [known, known]",
+                "{{definition_bundles}}\n\nReview the change.",
+                "schema validation failed",
+            ),
+            (
+                "definitions: [../escape]",
+                "{{definition_bundles}}\n\nReview the change.",
+                "schema validation failed",
+            ),
+            (
+                "definitions: [known]",
+                "Review the change.",
+                "must contain exactly one",
+            ),
+            (
+                "",
+                "{{definition_bundles}}\n\nReview the change.",
+                "selects no definitions",
+            ),
+            (
+                "definitions: [known]",
+                "{{definition_bundles}}\n\n{{definition_bundles}}\n\nReview the change.",
+                "must contain exactly one",
+            ),
+        ] {
+            let directory = fixture_pack();
+            fs::create_dir(directory.path().join("definitions")).unwrap();
+            fs::write(
+                directory.path().join("definitions/known.md"),
+                "Known definition.\n",
+            )
+            .unwrap();
+            let frontmatter = if definitions.is_empty() {
+                "requestedAccess: read-only".to_owned()
+            } else {
+                format!("requestedAccess: read-only\n{definitions}")
+            };
+            let agent = AGENT
+                .replace("requestedAccess: read-only", &frontmatter)
+                .replace(
+                    "Review the requested change and report actionable findings only.",
+                    instructions,
+                );
+            fs::write(directory.path().join("agents/pr-reviewer.md"), agent).unwrap();
+
+            let error = SourcePack::load(directory.path()).unwrap_err();
+            assert!(
+                error.to_string().contains(expected),
+                "expected {expected:?} in {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_unusable_definition_sources_before_any_agent_selects_them() {
+        let nested_marker = fixture_pack();
+        fs::create_dir(nested_marker.path().join("definitions")).unwrap();
+        fs::write(
+            nested_marker.path().join("definitions/known.md"),
+            "{{definition_bundles}}\n",
+        )
+        .unwrap();
+        let error = SourcePack::load(nested_marker.path()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("definition bundles may not include")
+        );
+
+        let unsafe_name = fixture_pack();
+        fs::create_dir(unsafe_name.path().join("definitions")).unwrap();
+        fs::write(
+            unsafe_name.path().join("definitions/NotPortable.md"),
+            "Definition.\n",
+        )
+        .unwrap();
+        let error = SourcePack::load(unsafe_name.path()).unwrap_err();
+        assert!(error.to_string().contains("definition filename"));
+    }
+
+    #[test]
     fn rejects_agent_templates_without_exactly_one_supported_slot() {
         for template in [
             "No slot.\n",
@@ -1204,6 +1606,88 @@ Review the requested change and report actionable findings only.
             b"#!/bin/sh\necho not-run\n"
         );
         assert!(payloads.contains_key("skills/review-checklist/SKILL.md"));
+    }
+
+    #[test]
+    fn preprocesses_skill_markdown_and_preserves_auxiliary_skill_file_bytes() {
+        let directory = tempdir().unwrap();
+        fs::create_dir(directory.path().join("definitions")).unwrap();
+        fs::write(
+            directory.path().join("definitions/assurance-terms.md"),
+            "## Assurance terms\n\nAn evidence gap prevents a defensible determination.\n",
+        )
+        .unwrap();
+        let skill = directory.path().join("skills/review-checklist");
+        fs::create_dir_all(skill.join("scripts")).unwrap();
+        fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: review-checklist\ndescription: A review checklist.\n---\n\n<!-- thor:definitions: assurance-terms -->\n\n{{definition_bundles}}\n\nUse this checklist.\n",
+        )
+        .unwrap();
+        let script = b"#!/bin/sh\n\x00echo not-run\n";
+        fs::write(skill.join("scripts/check.sh"), script).unwrap();
+
+        let payloads = collect_skill_payloads(directory.path().join("skills")).unwrap();
+        let rendered =
+            String::from_utf8(payloads["skills/review-checklist/SKILL.md"].clone()).unwrap();
+        assert!(rendered.contains("## Assurance terms"));
+        assert!(!rendered.contains("thor:definitions"));
+        assert!(!rendered.contains(DEFINITION_BUNDLES_SLOT));
+        assert_eq!(payloads["skills/review-checklist/scripts/check.sh"], script);
+    }
+
+    #[test]
+    fn rejects_invalid_missing_or_duplicate_skill_definition_directives_and_markers() {
+        for (directive, markers, expected) in [
+            (
+                "<!-- thor:definitions: missing -->",
+                "{{definition_bundles}}",
+                "definition bundle",
+            ),
+            (
+                "<!-- thor:definitions: known, known -->",
+                "{{definition_bundles}}",
+                "duplicate definition bundle",
+            ),
+            (
+                "<!-- thor:definitions: ../escape -->",
+                "{{definition_bundles}}",
+                "definition bundle",
+            ),
+            (
+                "<!-- thor:definitions: known -->",
+                "No marker.",
+                "must contain exactly one",
+            ),
+            (
+                "<!-- thor:definitions: known -->",
+                "{{definition_bundles}}\n{{definition_bundles}}",
+                "must contain exactly one",
+            ),
+        ] {
+            let directory = tempdir().unwrap();
+            fs::create_dir(directory.path().join("definitions")).unwrap();
+            fs::write(
+                directory.path().join("definitions/known.md"),
+                "Known definition.\n",
+            )
+            .unwrap();
+            let skill = directory.path().join("skills/review-checklist");
+            fs::create_dir_all(&skill).unwrap();
+            fs::write(
+                skill.join("SKILL.md"),
+                format!(
+                    "---\nname: review-checklist\ndescription: A review checklist.\n---\n\n{directive}\n\n{markers}\n"
+                ),
+            )
+            .unwrap();
+
+            let error = collect_skill_payloads(directory.path().join("skills")).unwrap_err();
+            assert!(
+                error.to_string().contains(expected),
+                "expected {expected:?} in {error}"
+            );
+        }
     }
 
     #[test]

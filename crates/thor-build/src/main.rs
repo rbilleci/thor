@@ -105,6 +105,8 @@ fn main() -> Result<()> {
         Command::Validate { source } => {
             let pack = SourcePack::load(&source)
                 .with_context(|| format!("invalid source {}", source.display()))?;
+            collect_skill_payloads(source.join("skills"))
+                .with_context(|| format!("invalid skills in {}", source.display()))?;
             for target in Harness::ALL {
                 collect_static_payloads(source.join(format!(".{}", target.as_str())), target)?;
             }
@@ -1045,7 +1047,7 @@ mod tests {
 
     use ed25519_dalek::{Signature, Verifier};
     use tempfile::tempdir;
-    use thor_core::{ArtifactManifest, SignatureEnvelope};
+    use thor_core::{ArtifactManifest, SignatureEnvelope, preprocess_skill_file};
     use zip::ZipArchive;
 
     use super::*;
@@ -1116,6 +1118,48 @@ Review the change.
             .unwrap()
         );
         assert!(!root.join(".codex/skills").exists());
+    }
+
+    #[test]
+    fn transform_expands_skill_markdown_for_both_targets_and_preserves_auxiliary_bytes() {
+        let source = tempdir().unwrap();
+        write_source(source.path());
+        fs::create_dir(source.path().join("definitions")).unwrap();
+        fs::write(
+            source.path().join("definitions/assurance-terms.md"),
+            "## Assurance terms\n\nA passing result has no findings or evidence gaps.\n",
+        )
+        .unwrap();
+        let skill = source.path().join("skills/review-checklist");
+        fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: review-checklist\ndescription: A checklist.\n---\n\n<!-- thor:definitions: assurance-terms -->\n\n{{definition_bundles}}\n\nCheck changes.\n",
+        )
+        .unwrap();
+        let script = b"#!/bin/sh\n\x00echo untouched\n";
+        fs::write(skill.join("references/severity.md"), script).unwrap();
+        let root = source.path().join("project");
+        fs::create_dir(&root).unwrap();
+
+        transform(source.path(), TargetSelection::All, &root, false).unwrap();
+
+        let expected = preprocess_skill_file(source.path(), skill.join("SKILL.md")).unwrap();
+        assert_eq!(
+            fs::read(root.join(".claude/skills/review-checklist/SKILL.md")).unwrap(),
+            expected
+        );
+        assert_eq!(
+            fs::read(root.join(".agents/skills/review-checklist/SKILL.md")).unwrap(),
+            expected
+        );
+        assert_eq!(
+            fs::read(root.join(".claude/skills/review-checklist/references/severity.md")).unwrap(),
+            script
+        );
+        assert_eq!(
+            fs::read(root.join(".agents/skills/review-checklist/references/severity.md")).unwrap(),
+            script
+        );
     }
 
     #[test]
@@ -1404,6 +1448,17 @@ Review the change.
     fn bundle_is_deterministic_and_signed() {
         let source = tempdir().unwrap();
         write_source(source.path());
+        fs::create_dir(source.path().join("definitions")).unwrap();
+        fs::write(
+            source.path().join("definitions/assurance-terms.md"),
+            "## Assurance terms\n\nA passing result has no findings or evidence gaps.\n",
+        )
+        .unwrap();
+        fs::write(
+            source.path().join("skills/review-checklist/SKILL.md"),
+            "---\nname: review-checklist\ndescription: A checklist.\n---\n\n<!-- thor:definitions: assurance-terms -->\n\n{{definition_bundles}}\n\nCheck changes.\n",
+        )
+        .unwrap();
         fs::create_dir_all(source.path().join(".codex")).unwrap();
         fs::write(
             source.path().join(".codex/config.toml"),
@@ -1436,6 +1491,16 @@ Review the change.
             .read_to_end(&mut manifest_bytes)
             .unwrap();
         let manifest: ArtifactManifest = serde_json::from_slice(&manifest_bytes).unwrap();
+        let mut skill_bytes = Vec::new();
+        archive
+            .by_name("skills/review-checklist/SKILL.md")
+            .unwrap()
+            .read_to_end(&mut skill_bytes)
+            .unwrap();
+        let skill = String::from_utf8(skill_bytes).unwrap();
+        assert!(skill.contains("## Assurance terms"));
+        assert!(!skill.contains("thor:definitions"));
+        assert!(!skill.contains("{{definition_bundles}}"));
         assert!(
             manifest
                 .payloads

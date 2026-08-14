@@ -11,13 +11,14 @@ The normative design and source-format contract are in
 ## What it provides
 
 - One portable agent definition per `assets/agents/<id>.md` file.
+- Optional reusable `assets/definitions/<id>.md` bundles expanded by validated identifiers.
 - Optional `assets/templates/<id>.md` wrappers for shared build-time instruction text.
 - A small `assets/thor.yaml` manifest for package metadata plus global logical model
   mappings, each of which supplies target model and Codex-aligned effort.
 - Pack-author rendering directly into Claude Code (`.md`) and Codex (`.toml`)
   project discovery directories for dogfooding.
-- Standard `assets/skills/<name>/SKILL.md` directories copied unchanged to each
-  target's documented skill location.
+- Standard `assets/skills/<name>/SKILL.md` directories with optional source-only
+  definition expansion; every other skill file is copied byte-for-byte.
 - Optional static files below `assets/.claude/` and `assets/.codex/`, copied
   unchanged below the matching harness root.
 - Deterministic, signed agent-pack bundles and a native Rust `thor` lifecycle
@@ -46,6 +47,8 @@ my-pack/
     ├── thor.yaml
     ├── agents/
     │   └── pr-reviewer.md
+    ├── definitions/
+    │   └── review-terms.md
     ├── templates/
     │   └── reviewer.md
     ├── .codex/
@@ -90,7 +93,8 @@ cargo run --locked -p thor-build -- transform
 ```
 
 This writes Claude agents and skills to `.claude/agents/` and `.claude/skills/`,
-Codex agents and skills to `.codex/agents/` and `.agents/skills/`, and copies
+Codex agents and skills to `.codex/agents/` and `.agents/skills/`, expands only
+source `SKILL.md` files, preserves every other skill file byte-for-byte, and copies
 static files below `assets/.claude/` or `assets/.codex/` to the matching harness
 root. Git tracks these generated definitions as reviewable dogfood snapshots;
 `assets/` remains the only authoring source. Each harness root contains a generated

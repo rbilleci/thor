@@ -5,6 +5,13 @@ description: Use only in the main conversation when the user asks to handle a mu
 
 # Dispatch Work
 
+
+## Slice and candidate terms
+
+A slice is a bounded, independently verifiable vertical unit that delivers one complete observable outcome across every affected layer, includes required validation, and does not depend on a later slice to finish the outcome.
+
+A frozen candidate is the requirements baseline, base commit, and complete Git commit. The Slice Owner commits it on the assigned branch before assurance and `COMPLETE`; an identity change invalidates evidence. A tree is an immutable Git tree object, never a mutable working tree. General review roles may accept a commit or tree, but the Slice Owner still requires a commit.
+
 Act as the Work Dispatcher. Use the existing checkout. Set the assigned branch to its current branch. Assign one active slice to one Slice Owner, wait for its terminal result or complete confirmed owner-loss handling, and only then start another slice. Do not coordinate implementation, design resolution, validation, selection, auditing, repair, or re-review.
 
 ## Delivery contract
