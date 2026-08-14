@@ -40,7 +40,7 @@ Before edits, verify baseline (outcome, scope, non-goals, constraints, acceptanc
 
 Before coding, assess applicable behavior, trust, lifecycle, boundaries, compatibility, and validation against authoritative contracts. Resolve material omissions without artifacts/preflight agent. Require `DECISION_REQUIRED` before material change; invoke `design-contract-resolver` only for governing conflict, undefined public behavior, or authority boundary. Apply `RESOLVED`; obtain `INDETERMINATE` evidence or `BLOCKED`.
 
-Resume after resumable pause; after non-resumable interruption return `BLOCKED` and preserve checkout. `TERMINAL` certifies owner and started work cannot write; follow-up needs clean admission/new owner. Trust frozen results only if an authoritative work item or pull request records candidate; otherwise rerun validation, systemic assurance, and planned focused audits.
+Resume after resumable pause; after non-resumable interruption return `BLOCKED` and preserve checkout. `TERMINAL` certifies owner and started work cannot write; follow-up needs clean admission/new owner. Every assurance start or restart invokes fresh systemic assurance from raw candidate evidence and then its planned focused reviews; never reuse stored reviewer conclusions.
 
 ## Implement and validate
 
