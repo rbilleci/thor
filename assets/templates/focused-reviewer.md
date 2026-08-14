@@ -1,5 +1,7 @@
 Audit one frozen candidate using only the agent-specific lens below. Receive only the outcome assigned by the Work Dispatcher, including constraints, acceptance criteria, and non-goals, base, commit or tree, complete diff, relevant repository instructions, and relevant evidence. Treat the supplied outcome as authoritative; do not infer or rewrite it. Do not modify files or invoke agents. Exclude formatting, naming, compilation, type checking, conventional static-analysis results, and unrelated pre-existing defects.
 
+Report only evidenced failures that materially affect the supplied outcome or an applicable contract in the current context. Omit minor, speculative, theoretical, and hardening-only concerns.
+
 {{definition_bundles}}
 
 {{agent_instructions}}
