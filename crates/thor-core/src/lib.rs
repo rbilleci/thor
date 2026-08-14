@@ -395,6 +395,33 @@ fn expand_agent_instructions(root: &Path, agent: &mut AgentDefinition) -> Result
                 format!("agent template must contain exactly one {AGENT_INSTRUCTIONS_SLOT} slot"),
             );
         }
+        let template_definition_slot_count =
+            template.match_indices(DEFINITION_BUNDLES_SLOT).count();
+        if definition_bundles.is_empty() {
+            if template_definition_slot_count != 0 {
+                return validation(
+                    &template_path,
+                    format!(
+                        "agent template selects no definitions but contains {DEFINITION_BUNDLES_SLOT}"
+                    ),
+                );
+            }
+        } else if template_definition_slot_count != 1 {
+            return validation(
+                &template_path,
+                format!(
+                    "agent template with definitions must contain exactly one {DEFINITION_BUNDLES_SLOT} slot"
+                ),
+            );
+        }
+        if agent.instructions.contains(DEFINITION_BUNDLES_SLOT) {
+            return validation(
+                &agent.source_path,
+                format!(
+                    "agent instructions may not contain {DEFINITION_BUNDLES_SLOT} when an agent template is selected"
+                ),
+            );
+        }
         let template = template.replacen(AGENT_INSTRUCTIONS_SLOT, agent.instructions.trim(), 1);
         (
             expand_definition_bundles(
@@ -1452,6 +1479,54 @@ Review the requested change and report actionable findings only.
                 "expected {expected:?} in {error}"
             );
         }
+    }
+
+    #[test]
+    fn rejects_a_definition_marker_supplied_by_a_templated_agent_body() {
+        let directory = fixture_pack();
+        fs::create_dir(directory.path().join("templates")).unwrap();
+        fs::create_dir(directory.path().join("definitions")).unwrap();
+        fs::write(
+            directory.path().join("templates/first-tier-reviewer.md"),
+            "Shared prefix.\n\n{{agent_instructions}}\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("definitions/known.md"),
+            "Known definition.\n",
+        )
+        .unwrap();
+        let agent = AGENT
+            .replace(
+                "requestedAccess: read-only",
+                "requestedAccess: read-only\ntemplate: first-tier-reviewer\ndefinitions: [known]",
+            )
+            .replace(
+                "Review the requested change and report actionable findings only.",
+                "{{definition_bundles}}\n\nReview the change.",
+            );
+        fs::write(directory.path().join("agents/pr-reviewer.md"), agent).unwrap();
+
+        let error = SourcePack::load(directory.path()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("agent template with definitions must contain exactly one"),
+            "unexpected error: {error}"
+        );
+
+        fs::write(
+            directory.path().join("templates/first-tier-reviewer.md"),
+            "Shared prefix.\n\n{{definition_bundles}}\n\n{{agent_instructions}}\n",
+        )
+        .unwrap();
+        let error = SourcePack::load(directory.path()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("agent instructions may not contain {{definition_bundles}}"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
