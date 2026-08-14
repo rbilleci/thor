@@ -4,14 +4,14 @@
 
 Thor is a source format and release workflow for defining reusable subagents once and installing prebuilt definitions into Claude Code, Codex, and later harnesses.
 
-The canonical source is a small YAML package manifest, one Markdown file per agent, and standard Agent Skills directories. CI validates and transforms the source into immutable target artifacts. Pack authors may also render directly into a project's harness discovery locations to dogfood the pack. A local `thor` command installs release artifacts; it never transforms source YAML and never needs either harness's compiler or configuration model.
+The canonical source is one Markdown file per agent and standard Agent Skills directories. CI validates and transforms the source into immutable target artifacts. Pack authors may also render directly into a project's harness discovery locations to dogfood the pack. A local `thor` command installs release artifacts; it never transforms source YAML and never needs either harness's compiler or configuration model.
 
-This deliberately keeps the portable surface small. Each agent owns its explicit settings in its own Markdown file; the root manifest owns package-wide model classes that resolve both target model and effort.
+This deliberately keeps the portable surface small. Each agent owns its explicit settings, including concrete target model and effort, in its own Markdown file.
 
 ## Goals
 
-- Define each subagent in its own source file, with a stable, harness-neutral identifier, description, instructions, model class, requested access profile, and a small set of target-only settings.
-- Keep all target model and effort mapping global, never repeated in an agent.
+- Define each subagent in its own source file, with a stable, harness-neutral identifier, description, instructions, requested access profile, concrete target model and effort, and a small set of target-only settings.
+- Derive the pack target set from the same non-empty target keys in every source agent.
 - Install, update, and uninstall both agents and standard skills from a GitHub repository/release.
 - Make every installed file attributable to an exact release and safely removable.
 - Render reviewable Claude Code and Codex dogfood snapshots from the portable
@@ -33,7 +33,7 @@ Thor uses two deliberately separate repository roles:
 | Repository | Contents | Releases |
 |---|---|---|
 | `github.com/<org>/thor` | The Rust workspace, the canonical schemas, bootstrap scripts, and CI | Native `thor` binaries, `SHA256SUMS`, signed CLI release manifest, and bootstrap scripts. |
-| `github.com/<org>/<agent-pack>` | Only `assets/thor.yaml`, `assets/agents/`, optional `assets/definitions/` and `assets/templates/`, `assets/skills/`, pack tests, and pack CI configuration | A signed `thor-bundle-<pack-version>.zip`. It contains no CLI binary or installer script. |
+| `github.com/<org>/<agent-pack>` | Only `assets/agents/`, optional `assets/definitions/` and `assets/templates/`, `assets/skills/`, pack tests, and pack CI configuration | A signed `thor-bundle-<pack-version>.zip`. It contains no CLI binary or installer script. |
 
 The agent-pack CI uses a version-pinned `thor-build` binary from the Thor tool repository. Before it executes that binary, it verifies the signed Thor tool release manifest against the Thor release public key pinned in the pack workflow, then verifies the selected `thor-build` asset's SHA-256 digest from that manifest. End users only download the native `thor` CLI and agent-pack bundles.
 
@@ -41,7 +41,7 @@ The agent-pack CI uses a version-pinned `thor-build` binary from the Thor tool r
 
 ```text
 Agent-pack repository
-  assets/thor.yaml + assets/agents/<id>.md + assets/definitions/<id>.md + assets/templates/<id>.md + assets/skills/<name>/SKILL.md
+  assets/agents/<id>.md + assets/definitions/<id>.md + assets/templates/<id>.md + assets/skills/<name>/SKILL.md
               |
               | CI: validate -> transform -> snapshot-test -> package
               v
@@ -73,7 +73,6 @@ The source repository and the release artifact are separate concerns:
 ```text
 agent-pack/
 ├── assets/                            # Complete transform/package source root
-│   ├── thor.yaml                      # Package metadata plus global model mappings only
 │   ├── agents/                        # One portable source file per subagent
 │   │   ├── pr-reviewer.md
 │   │   └── focused-fixer.md
@@ -99,8 +98,7 @@ The standard's optional `allowed-tools` field has differing host support. Treat 
 
 Thor has these source inputs:
 
-- `assets/thor.yaml` is the versioned package manifest. It contains package metadata plus global logical-model mappings. Each target entry resolves both a harness model and a Codex-aligned effort.
-- `assets/agents/<id>.md` defines one subagent. Its YAML frontmatter is the agent configuration; its Markdown body is either the complete instruction text or the agent-specific text inserted into its declared template. The optional `definitions` list selects reusable definition bundles by identifier. Thor rejects reserved bundle markers in agent frontmatter and skill directives in agent frontmatter, bodies, and templates.
+- `assets/agents/<id>.md` defines one subagent. Its YAML frontmatter contains the agent configuration, including the concrete `model` and `effort` for every selected target; its Markdown body is either the complete instruction text or the agent-specific text inserted into its declared template. The optional `definitions` list selects reusable definition bundles by identifier. Thor rejects reserved bundle markers in agent frontmatter and skill directives in agent frontmatter, bodies, and templates.
 - `assets/definitions/<id>.md` is a UTF-8 Markdown definition bundle. Thor derives its path from the validated identifier, rejects empty, linked, missing, or nested-definition sources, and expands selected bundles in declaration order. Definition bundles are build-time source only and are never packaged as separate files.
 - `assets/templates/<id>.md` is an optional build-time instruction wrapper. It contains exactly one `{{agent_instructions}}` slot. A direct agent that selects definitions requires exactly one `{{definition_bundles}}` marker in its instructions; an agent using a template requires exactly one marker in the raw template and none in its body. Thor validates those source locations before composition, inserts the non-empty agent body and selected bundles, rejects every other slot, and sends only expanded instructions to target renderers.
 - `assets/skills/<name>/SKILL.md` may select bundles with one exact source-only directive, `<!-- thor:definitions: <id>[, <id>...] -->`, and requires exactly one `{{definition_bundles}}` marker. Thor rejects both reserved forms in skill frontmatter, then removes the directive and marker while inserting the selected bundles before target copy or bundle packaging. The generated file retains Agent Skills frontmatter and Markdown instructions; Thor copies every other file below the skill directory byte-for-byte.
@@ -108,43 +106,7 @@ Thor has these source inputs:
 
 Dogfood transformation overwrites each static source path but does not remove a static output after its source file disappears. Release installation tracks static payloads in the normal file inventory, so an update that removes a static payload removes its previously installed file.
 
-The Thor tool repository's `schema/thor-v1.schema.json` is the sole normative schema source. It contains separate definitions for the package manifest and agent frontmatter and is embedded in the versioned `thor-build` binary. The Rust structures use `serde(deny_unknown_fields)` and must agree with that schema. CI validates frontmatter against the schema; the Markdown parser separately requires a non-empty UTF-8 body. YAML/Markdown remain author-friendly while the schema gives a language-neutral contract and clear validation failures.
-
-### Package manifest: `assets/thor.yaml`
-
-```yaml
-apiVersion: thor/v1alpha1
-kind: AgentPack
-
-metadata:
-  name: acme-engineering
-  version: 1.2.0
-  description: Focused engineering subagents and reusable skills.
-
-spec:
-  targets: [claude, codex]
-
-  # Logical classes, not target model names. Every class must map to every
-  # package target; the transformer otherwise fails.
-  models:
-    fast:
-      description: Fast, bounded research and triage.
-      targets:
-        claude: { model: haiku, effort: low }
-        codex: { model: gpt-5.6-luna, effort: low }
-    balanced:
-      description: Default quality/cost balance for implementation.
-      targets:
-        claude: { model: sonnet, effort: high }
-        codex: { model: gpt-5.6-terra, effort: high }
-    frontier:
-      description: Highest capability for difficult review or design work.
-      targets:
-        claude: { model: haiku, effort: xhigh }
-        codex: { model: gpt-5.6-luna, effort: xhigh }
-```
-
-Each target model mapping has a non-empty `model` and one Codex-aligned `effort`: `low`, `medium`, `high`, `xhigh`, or `max`. `assets/thor.yaml` has no `defaults`, `agents`, `efforts`, or `targetDefaults` section. A model identifier is the only globally shared configuration an agent file may reference.
+The Thor tool repository's `schema/thor-v1.schema.json` is the sole normative schema source. It defines agent frontmatter and is embedded in the versioned `thor-build` binary. The Rust structures use `serde(deny_unknown_fields)` and must agree with that schema. CI validates frontmatter against the schema; the Markdown parser separately requires a non-empty UTF-8 body. YAML/Markdown remain author-friendly while the schema gives a language-neutral contract and clear validation failures.
 
 ### Agent definition: `assets/agents/pr-reviewer.md`
 
@@ -152,23 +114,27 @@ Each target model mapping has a non-empty `model` and one Codex-aligned `effort`
 ---
 id: pr-reviewer
 description: Reviews a pull request for correctness, security, and test gaps.
-model: frontier
 requestedAccess: read-only
 
-# Every non-shared setting belongs to this agent. Its omission preserves the
-# target's documented default or parent-inheritance semantics, by field.
 targets:
   claude:
+    model: haiku
+    effort: xhigh
     maxTurns: 20
     background: false
     # Optional when a separate worktree is required:
     # isolation: worktree
+  codex:
+    model: gpt-5.6-luna
+    effort: xhigh
 ---
 
 Review the requested change as an owner. Report only actionable findings.
 For each finding, state its severity, affected file, rationale, and a concise
 reproduction or verification path. Do not change files.
 ```
+
+Every source agent must define the same non-empty set of target keys. Each target model mapping has a non-empty `model` and one Codex-aligned `effort`: `low`, `medium`, `high`, `xhigh`, or `max`. A package has no defaults, shared model aliases, inheritance, or separate metadata file. `thor-build bundle` receives package identity explicitly through `--package-name` and `--package-version`.
 
 The filename must be `assets/agents/<id>.md`; the frontmatter `id` is the source of truth and CI rejects a mismatch. Source agents are flat in v1: no subdirectories, no inheritance, and no catch-all default file. An optional template performs deterministic build-time text composition; it does not inherit configuration or create a runtime dependency. This mirrors the generated target layout, where each harness receives one expanded file per agent in its `agents/` directory.
 
@@ -178,17 +144,16 @@ Thor's portable agent and skill identifier rule is `[a-z][a-z0-9-]{0,63}`. Every
 
 | Field | Rule |
 |---|---|
-| `assets/thor.yaml` identity | `apiVersion`, `kind`, `metadata.name`, and `metadata.version` are required. v1 accepts exactly `thor/v1alpha1` and `AgentPack`; CI requires the version to equal the release tag without its `v` prefix. |
-| Agent files | Every `assets/agents/*.md` file must have YAML frontmatter and a non-empty Markdown body. No agent may be defined in `assets/thor.yaml`. |
+| Agent files | Every `assets/agents/*.md` file must have YAML frontmatter and a non-empty Markdown body. There is no package manifest. |
 | Agent `id` | Required; lowercase letters, digits, and hyphens; starts with a letter; 1–64 characters. It must equal the filename stem. |
-| `description`, `model`, `requestedAccess` | Required, non-empty. Descriptions include the role and delegation trigger; `model` must reference the global catalog. |
+| `description`, `requestedAccess`, `targets` | Required. Descriptions include the role and delegation trigger. `targets` must have at least one known target and every source agent must use the same target-key set. |
 | `template` | Optional Thor identifier. Thor reads `assets/templates/<template>.md`, which must be a regular UTF-8 file containing exactly one `{{agent_instructions}}` slot and, when the agent selects definitions, exactly one `{{definition_bundles}}` marker. Templates are expanded during source loading and are not packaged. |
 | `definitions` | Optional non-empty, unique list of Thor identifiers. Thor derives each path as `assets/definitions/<id>.md`, expands bundles in list order, and rejects unsafe, linked, missing, duplicate, empty, or nested-definition sources. An agent that selects bundles requires exactly one `{{definition_bundles}}` marker. |
 | `instructions` | The Markdown body; required and non-empty. Thor either transforms it directly or inserts it into the declared template before producing a Claude Code Markdown body and Codex `developer_instructions`. |
-| Model target mapping | Every selected target in every model class requires non-empty `model` and an effort of `low`, `medium`, `high`, `xhigh`, or `max`. |
+| Target model mapping | Every selected target in every agent requires non-empty `model` and an effort of `low`, `medium`, `high`, `xhigh`, or `max`. |
 | `requestedAccess` | One of `inherit`, `read-only`, or `workspace-write`. It is an initial request to the harness, never a security guarantee; parent policy and live approvals can be more restrictive or permissive. |
-| `targets.claude` | Optional. The v1 typed allowlist is `maxTurns` (positive integer), `background` (boolean), and `isolation: worktree`. Omitting it, or an individual field, preserves Claude Code's documented default or parent-inheritance behavior for that field. |
-| `targets.codex` | Not accepted in v1. Codex does support further session settings such as `mcp_servers` and `skills.config`, but endpoint definitions and machine-specific skill paths are intentionally outside Thor's small portable and install-safe contract. |
+| `targets.claude` | When selected, requires `model` and `effort`; the v1 typed allowlist also includes `maxTurns` (positive integer), `background` (boolean), and `isolation: worktree`. Omitting a Claude-only field preserves Claude Code's documented default or parent-inheritance behavior for that field. |
+| `targets.codex` | When selected, requires `model` and `effort`. Codex does support further session settings such as `mcp_servers` and `skills.config`, but endpoint definitions and machine-specific skill paths are intentionally outside Thor's small portable and install-safe contract. |
 | Unknown fields | Rejected. Add new portable behavior through a versioned schema change, not unvalidated per-target blobs. |
 
 ## Common portability contract
@@ -200,7 +165,7 @@ Thor v1 guarantees the following common behavior, and only this behavior:
 | Identity | Stable `id`, used as the generated target agent name and the installer-owned filename. |
 | Delegation guidance | A concise description of what the agent does and when it should be selected. |
 | Behavioral instructions | Markdown instructions governing the delegated task and expected result. |
-| Model class | A global logical model tier (`fast`, `balanced`, `frontier`) that resolves its own target model and Codex-aligned effort. |
+| Target model and effort | Each selected target's concrete model identifier and Codex-aligned effort. |
 | Requested access profile | Ask the target for parent inheritance, read-only access, or workspace-write access. This is not a sandbox or approval-policy guarantee. |
 | Package skills | Standard skills installed beside the target configuration and available to the harness. |
 
@@ -213,12 +178,11 @@ Agent-specific skill preloading is excluded from the v1 contract. Claude can pre
 | `id` | YAML `name`; `.claude/agents/<id>.md` | TOML `name`; `.codex/agents/<id>.toml` |
 | `description` | YAML `description` | TOML `description` |
 | Expanded `instructions` and definition bundles | Markdown after YAML frontmatter | `developer_instructions` multiline TOML string |
-| Model reference | Resolve `spec.models.<model-id>.targets.claude.model` into `model` and `.effort` into YAML `effort` | Resolve `spec.models.<model-id>.targets.codex.model` into `model` and `.effort` into `model_reasoning_effort` |
+| Target model and effort | Read `targets.claude.model` and `.effort` into YAML `model` and `effort` | Read `targets.codex.model` and `.effort` into TOML `model` and `model_reasoning_effort` |
 | `requestedAccess: inherit` | Omit tools and permission mode; parent configuration applies | Omit `sandbox_mode`; parent configuration applies |
 | `requestedAccess: read-only` | Request `permissionMode: plan` and emit the fixed allowlist `Read, Grep, Glob, Bash` | Request `sandbox_mode = "read-only"` |
 | `requestedAccess: workspace-write` | Request `permissionMode: default`; do not emit a tool allowlist | Request `sandbox_mode = "workspace-write"` |
-| `targets.claude` | Emit only validated `maxTurns`, `background`, and optional `isolation: worktree` | N/A |
-| `targets.codex` | Rejected in v1 by design; a future typed adapter may add it | N/A |
+| Claude-only target settings | Emit validated `maxTurns`, `background`, and optional `isolation: worktree` from `targets.claude` | N/A |
 
 The transformer must fail when it cannot safely make this mapping. It must never silently drop a source field or pick an arbitrary model/effort fallback. A target adapter may emit a warning only for a documented, semantically harmless presentation difference.
 
@@ -262,21 +226,21 @@ concise reproduction or verification path. Do not change files.
 
 ## Per-agent target settings and future targets
 
-An agent's `targets` section is the sole home for fields that cannot be shared. It is a typed, versioned allowlist rather than an arbitrary target-configuration passthrough: in v1 it supports only Claude Code's `maxTurns`, `background`, and `isolation: worktree`. There are no package-wide fallbacks for these fields.
+An agent's `targets` section is the sole home for target-specific fields. Every selected target defines its concrete model and effort. It is a typed, versioned allowlist rather than an arbitrary target-configuration passthrough: in v1, Claude Code also supports `maxTurns`, `background`, and `isolation: worktree`. There are no package-wide fallbacks for these fields.
 
 This makes every generated behavior inspectable from one source file. It also avoids a hidden default changing the meaning of an agent when a package is updated. An agent may omit a target setting only when that target's documented default or parent-inheritance behavior is desired.
 
-When adding a new harness, implement a `TargetAdapter`, add `{ model, effort }` mappings to every global model class, define the adapter's accepted `targets.<new-target>` keys in the JSON Schema, add golden-output tests, and release a new bundle. Existing agent source files either supply the new target settings or intentionally use its documented default/inheritance behavior; CI reports any required missing configuration.
+When adding a new harness, implement a `TargetAdapter`, define its `targets.<new-target>` model, effort, and accepted settings in the JSON Schema, update every source agent with that target configuration, add golden-output tests, and release a new bundle. CI rejects a missing or inconsistent target configuration.
 
 ## CI/CD, release artifacts, and compatibility
 
 The pack and CLI have independent release pipelines. An agent-pack release runs on a protected tag, for example `v1.2.0`:
 
 1. Download the exact version-pinned Thor tool release. Verify its signed release manifest with the Thor public key pinned in the pack workflow, then verify the named `thor-build` asset's SHA-256 digest before executing it.
-2. Parse `assets/thor.yaml` and every `assets/agents/*.md`, validate and expand any referenced definition bundle and instruction template, and resolve each model's target model/effort mapping. There is no agent inheritance or default resolution.
+2. Parse every `assets/agents/*.md`, validate and expand any referenced definition bundle and instruction template, infer the common target set, and resolve each agent's target model/effort mapping. There is no agent inheritance or default resolution.
 3. Validate every `assets/skills/*/SKILL.md` against the Agent Skills standard, expand its selected definition bundles, and validate the complete skill tree for portable packaging: its directory basename and `SKILL.md` `name` must match the Thor identifier rule; all paths must be normalized relative ASCII-safe paths; and every entry must be a regular file or directory, never a symlink, hard link, device, or FIFO.
 4. Transform each independently defined agent for `claude` and `codex`; compare to approved golden snapshots and run target syntax checks where practical.
-5. Copy each expanded `SKILL.md` and every other skill file byte-for-byte, calculate SHA-256 digests, create `thor-bundle-1.2.0.zip`, and produce a detached, versioned Ed25519 signature over the exact archive bytes using the pack's CI-held key.
+5. Copy each expanded `SKILL.md` and every other skill file byte-for-byte, calculate SHA-256 digests, create `thor-bundle-1.2.0.zip` with `--package-name` and `--package-version`, and produce a detached, versioned Ed25519 signature over the exact archive bytes using the pack's CI-held key.
 6. Publish only the immutable bundle and its detached signature to the pack's GitHub Release.
 
 The Thor tool pipeline builds, tests, signs, and publishes the native `thor` binaries and bootstrap assets in its own release. Pack CI does not build, package, or publish an installer.
@@ -307,7 +271,7 @@ Thor CLI release assets
 └── install.ps1
 ```
 
-`manifest.json` contains `format`, `minimumThorVersion`, package name and version, canonical `sourceRepository`, source release tag, immutable source commit, supported targets, tested harness-version ranges, and a SHA-256 digest for every payload file. It contains no executable installation steps. The release client fetches an asset only from the exact GitHub Release for the canonical repository and selected tag, resolves that repository tag to its immutable commit, and requires it to equal the signed `sourceCommit`. On `init`, the CLI also requires the signed repository and tag/package version to match `--repo` and `--ref`. On `update`, it requires the repository and package identity to match the state record and, when given, the requested tag/package version to match `--ref`. It records the verified immutable commit and exposes it through `status`. The installed CLI rejects an unknown format, an incompatible `minimumThorVersion`, unsupported selected target, a harness version outside a declared compatible range when it can determine that version, or a bad pack signature before it writes anything.
+`manifest.json` contains `format`, `minimumThorVersion`, the `--package-name` and `--package-version` inputs, canonical `sourceRepository`, `sourceReleaseTag` derived as `v<package-version>`, immutable source commit, supported targets, tested harness-version ranges, and a SHA-256 digest for every payload file. It contains no executable installation steps. The release client fetches an asset only from the exact GitHub Release for the canonical repository and selected tag, resolves that repository tag to its immutable commit, and requires it to equal the signed `sourceCommit`. On `init`, the CLI also requires the signed repository and tag/package version to match `--repo` and `--ref`. On `update`, it requires the repository and package identity to match the state record and, when given, the requested tag/package version to match `--ref`. It records the verified immutable commit and exposes it through `status`. The installed CLI rejects an unknown format, an incompatible `minimumThorVersion`, unsupported selected target, a harness version outside a declared compatible range when it can determine that version, or a bad pack signature before it writes anything.
 
 With no explicit `--ref`, “latest compatible” means the greatest stable semantic-release tag whose signed manifest has a supported format, satisfies the installed CLI's `minimumThorVersion`, matches the pack signing key recorded at `init`, supports every selected target, and declares compatibility with any detected harness version. If harness version detection is unavailable, Thor warns and requires `--allow-unknown-harness-version`; it does not silently claim compatibility.
 
@@ -398,6 +362,7 @@ thor-build <command>
 │             [--root <project-root>] [--check]                  # defaults: all, .
 └── bundle [--source <pack-directory>] --out <zip> --signing-key <seed-file>
            --source-repository <owner/repository> --source-commit <commit>
+           --package-name <name> --package-version <semantic-version>
 ```
 
 `transform` writes the selected target's agents and complete skills directly to
@@ -428,7 +393,7 @@ does not retain an intermediate `dist/` tree.
 
 | Component | Responsibility |
 |---|---|
-| `PackParser` | Parses YAML and Markdown frontmatter, validates JSON Schema, enforces filename/identity rules, and resolves each model's target model/effort mapping. |
+| `PackParser` | Parses YAML and Markdown frontmatter, validates JSON Schema, enforces filename/identity rules, infers the common target set, and resolves each agent's target model/effort mapping. |
 | `TargetAdapter` | One small implementation each for Claude Code and Codex; maps a resolved portable agent to target text. It is a compile-time extension point, not a runtime plugin system. |
 | `BundleService` | Expands `SKILL.md`, copies other skill files byte-for-byte, writes the artifact manifest, calculates payload digests, and creates the bundle ZIP. |
 
@@ -484,10 +449,10 @@ Progress is non-terminal operational communication. It neither creates durable r
 
 ## Validation and acceptance criteria
 
-- Each source agent is exactly one `assets/agents/<id>.md` file; no agent may appear in `assets/thor.yaml`, and its filename must equal its `id`. A source agent may reference one build-time instruction template by identifier.
-- A source agent cannot name `sonnet`, `opus`, or a Codex model. It may reference only a global logical model id; that model resolves both the target model and Codex-aligned effort.
+- Each source agent is exactly one `assets/agents/<id>.md` file, and its filename must equal its `id`. A source agent may reference one build-time instruction template by identifier.
+- Every source agent defines a concrete model and Codex-aligned effort for the same non-empty target set. Source agents do not reference shared model aliases.
 - `thor-v1.schema.json` and strict Rust deserialization accept and reject the same fixtures, including unknown fields and invalid `targets` keys.
-- Removing a target mapping used by an agent fails CI with its agent id and missing mapping.
+- Missing, invalid, unknown, or inconsistent target model mappings fail CI with the affected agent path.
 - Every release contains identical skill file digests under `skills/` regardless of target.
 - Pack CI refuses an unsigned/wrongly signed Thor tool release or a `thor-build` asset whose manifest digest differs, and source validation rejects unsafe skill files before packaging.
 - Golden tests prove the complete generated Markdown and TOML for representative read-only and write-capable agents.

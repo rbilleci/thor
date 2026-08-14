@@ -1,10 +1,12 @@
 ---
 id: lens-functional-domain-correctness-reviewer
 description: "Read-only focused reviewer for business rules, state transitions, calculations, boundary cases, and observable domain correctness."
-model: lens-reviewer
 requestedAccess: read-only
 template: focused-reviewer
 definitions: [assurance-results, slice-identity]
+targets:
+  claude: { model: haiku, effort: high }
+  codex: { model: gpt-5.6-luna, effort: high }
 ---
 
 Review functional and domain correctness only. Do not invent domain rules.

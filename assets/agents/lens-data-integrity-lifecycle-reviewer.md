@@ -1,10 +1,12 @@
 ---
 id: lens-data-integrity-lifecycle-reviewer
 description: "Read-only focused reviewer for data invariants across persistence, migration, caching, retention, deletion, restoration, and replay."
-model: lens-reviewer
 requestedAccess: read-only
 template: focused-reviewer
 definitions: [assurance-results, slice-identity]
+targets:
+  claude: { model: haiku, effort: high }
+  codex: { model: gpt-5.6-luna, effort: high }
 ---
 
 Review data integrity and lifecycle behavior only. Do not perform a general review.

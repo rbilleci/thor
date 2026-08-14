@@ -71,6 +71,12 @@ enum Command {
         /// Immutable Git commit that the release tag resolves to.
         #[arg(long)]
         source_commit: String,
+        /// Package name recorded in the signed artifact manifest.
+        #[arg(long)]
+        package_name: String,
+        /// Package version recorded in the signed artifact manifest.
+        #[arg(long)]
+        package_version: String,
         #[arg(long, default_value = "0.1.0")]
         minimum_thor_version: String,
         #[arg(long)]
@@ -115,10 +121,9 @@ fn main() -> Result<()> {
                 collect_static_payloads(source.join(format!(".{}", target.as_str())), target)?;
             }
             println!(
-                "validated {} {} with {} agent(s)",
-                pack.manifest.metadata.name,
-                pack.manifest.metadata.version,
-                pack.agents.len()
+                "validated {} agent(s) for {} target(s)",
+                pack.agents.len(),
+                pack.targets.len()
             );
         }
         Command::Transform {
@@ -133,6 +138,8 @@ fn main() -> Result<()> {
             signing_key,
             source_repository,
             source_commit,
+            package_name,
+            package_version,
             minimum_thor_version,
             claude_compatibility,
             codex_compatibility,
@@ -140,6 +147,8 @@ fn main() -> Result<()> {
             let metadata = BundleMetadata {
                 source_repository,
                 source_commit,
+                package_name,
+                package_version,
                 minimum_thor_version,
                 claude_compatibility,
                 codex_compatibility,
@@ -192,6 +201,8 @@ fn main() -> Result<()> {
 struct BundleMetadata {
     source_repository: String,
     source_commit: String,
+    package_name: String,
+    package_version: String,
     minimum_thor_version: String,
     claude_compatibility: Option<String>,
     codex_compatibility: Option<String>,
@@ -317,15 +328,15 @@ fn transform(source: &Path, selection: TargetSelection, root: &Path, check: bool
     let pack =
         SourcePack::load(source).with_context(|| format!("invalid source {}", source.display()))?;
     let targets = match selection {
-        TargetSelection::All => pack.manifest.spec.targets.clone(),
+        TargetSelection::All => pack.targets.clone(),
         TargetSelection::One(target) => vec![target],
     };
     for target in &targets {
-        if !pack.manifest.spec.targets.contains(target) {
+        if !pack.targets.contains(target) {
             bail!(
-                "target {} is not selected by {}",
+                "target {} is not configured by every source agent in {}",
                 target.as_str(),
-                source.join("thor.yaml").display()
+                source.display()
             );
         }
     }
@@ -928,7 +939,7 @@ fn bundle(
         SourcePack::load(source).with_context(|| format!("invalid source {}", source.display()))?;
     let mut payloads =
         collect_skill_payloads_with_definitions(source.join("skills"), pack.definition_bundles())?;
-    let mut targets = pack.manifest.spec.targets.clone();
+    let mut targets = pack.targets.clone();
     targets.sort();
     for target in &targets {
         for (path, bytes) in
@@ -963,11 +974,11 @@ fn bundle(
         format: "thor-bundle/v1".to_owned(),
         minimum_thor_version: metadata.minimum_thor_version.clone(),
         package: ArtifactPackage {
-            name: pack.manifest.metadata.name.clone(),
-            version: pack.manifest.metadata.version.clone(),
+            name: metadata.package_name.clone(),
+            version: metadata.package_version.clone(),
         },
         source_repository: metadata.source_repository.clone(),
-        source_release_tag: format!("v{}", pack.manifest.metadata.version),
+        source_release_tag: format!("v{}", metadata.package_version),
         source_commit: metadata.source_commit.clone(),
         targets,
         harness_compatibility,
@@ -993,6 +1004,14 @@ fn bundle(
 }
 
 fn validate_bundle_metadata(metadata: &BundleMetadata) -> Result<()> {
+    if !is_package_identifier(&metadata.package_name) {
+        bail!("--package-name must match [a-z][a-z0-9-]{{0,63}}");
+    }
+    if metadata.package_version.starts_with('v')
+        || metadata.package_version.parse::<semver::Version>().is_err()
+    {
+        bail!("--package-version must be semantic versioning without a v prefix");
+    }
     if canonical_repository(&metadata.source_repository).is_none() {
         bail!("--source-repository must be a canonical owner/repository identity");
     }
@@ -1014,6 +1033,13 @@ fn validate_bundle_metadata(metadata: &BundleMetadata) -> Result<()> {
         bail!("--minimum-thor-version must be a semantic version");
     }
     Ok(())
+}
+
+fn is_package_identifier(value: &str) -> bool {
+    let mut characters = value.bytes();
+    matches!(characters.next(), Some(byte) if byte.is_ascii_lowercase())
+        && value.len() <= 64
+        && characters.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
 fn compatibility_for(
@@ -1148,25 +1174,13 @@ mod tests {
 
     use super::*;
 
-    const MANIFEST: &str = r#"
-apiVersion: thor/v1alpha1
-kind: AgentPack
-metadata: { name: acme-engineering, version: 1.2.0, description: Agents. }
-spec:
-  targets: [claude, codex]
-  models:
-    frontier:
-      description: Deep work.
-      targets:
-        claude: { model: opus, effort: high }
-        codex: { model: gpt-5.6, effort: high }
-"#;
-
     const AGENT: &str = r#"---
 id: reviewer
 description: Reviews changes.
-model: frontier
 requestedAccess: read-only
+targets:
+  claude: { model: opus, effort: high }
+  codex: { model: gpt-5.6, effort: high }
 ---
 
 Review the change.
@@ -1175,8 +1189,10 @@ Review the change.
     const ADDED_AGENT: &str = r#"---
 id: architect
 description: Designs changes.
-model: frontier
 requestedAccess: read-only
+targets:
+  claude: { model: opus, effort: high }
+  codex: { model: gpt-5.6, effort: high }
 ---
 
 Design the change.
@@ -1189,6 +1205,23 @@ Design the change.
             panic!("expected validate command");
         };
         assert_eq!(source, PathBuf::from(DEFAULT_SOURCE_DIRECTORY));
+    }
+
+    #[test]
+    fn bundle_requires_explicit_package_identity_arguments() {
+        let arguments = [
+            "thor-build",
+            "bundle",
+            "--out",
+            "bundle.zip",
+            "--signing-key",
+            "key.txt",
+            "--source-repository",
+            "acme/agent-pack",
+            "--source-commit",
+            "0123456789abcdef0123456789abcdef01234567",
+        ];
+        assert!(Cli::try_parse_from(arguments).is_err());
     }
 
     #[test]
@@ -1526,12 +1559,12 @@ Design the change.
     }
 
     #[test]
-    fn transform_all_uses_only_targets_selected_by_the_pack() {
+    fn transform_all_uses_the_targets_configured_by_every_agent() {
         let source = tempdir().unwrap();
         write_source(source.path());
         fs::write(
-            source.path().join("thor.yaml"),
-            MANIFEST.replace("targets: [claude, codex]", "targets: [claude]"),
+            source.path().join("agents/reviewer.md"),
+            AGENT.replace("  codex: { model: gpt-5.6, effort: high }\n", ""),
         )
         .unwrap();
         let root = source.path().join("project");
@@ -1619,6 +1652,8 @@ Design the change.
         let metadata = BundleMetadata {
             source_repository: "acme/agent-pack".to_owned(),
             source_commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            package_name: "acme-engineering".to_owned(),
+            package_version: "1.2.0".to_owned(),
             minimum_thor_version: "0.1.0".to_owned(),
             claude_compatibility: Some(">=1.0.0".to_owned()),
             codex_compatibility: Some(">=1.0.0".to_owned()),
@@ -1640,6 +1675,9 @@ Design the change.
             .read_to_end(&mut manifest_bytes)
             .unwrap();
         let manifest: ArtifactManifest = serde_json::from_slice(&manifest_bytes).unwrap();
+        assert_eq!(manifest.package.name, "acme-engineering");
+        assert_eq!(manifest.package.version, "1.2.0");
+        assert_eq!(manifest.source_release_tag, "v1.2.0");
         let mut skill_bytes = Vec::new();
         archive
             .by_name("skills/review-checklist/SKILL.md")
@@ -1677,6 +1715,8 @@ Design the change.
         let short_commit = BundleMetadata {
             source_repository: "acme/agent-pack".to_owned(),
             source_commit: "0123456".to_owned(),
+            package_name: "acme-engineering".to_owned(),
+            package_version: "1.2.0".to_owned(),
             minimum_thor_version: "0.1.0".to_owned(),
             claude_compatibility: Some(">=1.0.0".to_owned()),
             codex_compatibility: Some(">=1.0.0".to_owned()),
@@ -1686,15 +1726,29 @@ Design the change.
         let invalid_range = BundleMetadata {
             source_repository: "acme/agent-pack".to_owned(),
             source_commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            package_name: "acme-engineering".to_owned(),
+            package_version: "1.2.0".to_owned(),
             minimum_thor_version: "0.1.0".to_owned(),
             claude_compatibility: Some("not a range".to_owned()),
             codex_compatibility: Some(">=1.0.0".to_owned()),
         };
         assert!(compatibility_for(&Harness::ALL, &invalid_range).is_err());
+
+        let invalid_package_name = BundleMetadata {
+            package_name: "Acme Engineering".to_owned(),
+            ..invalid_range
+        };
+        assert!(validate_bundle_metadata(&invalid_package_name).is_err());
+
+        let invalid_package_version = BundleMetadata {
+            package_name: "acme-engineering".to_owned(),
+            package_version: "v1.2.0".to_owned(),
+            ..invalid_package_name
+        };
+        assert!(validate_bundle_metadata(&invalid_package_version).is_err());
     }
 
     fn write_source(source: &Path) {
-        fs::write(source.join("thor.yaml"), MANIFEST).unwrap();
         fs::create_dir(source.join("agents")).unwrap();
         fs::write(source.join("agents/reviewer.md"), AGENT).unwrap();
         let skill = source.join("skills/review-checklist");
@@ -1776,7 +1830,7 @@ Design the change.
     ) {
         let pack = SourcePack::load(source).unwrap();
         let targets = match selection {
-            TargetSelection::All => pack.manifest.spec.targets.clone(),
+            TargetSelection::All => pack.targets.clone(),
             TargetSelection::One(target) => vec![target],
         };
         let skill_payloads = collect_skill_payloads_with_definitions(

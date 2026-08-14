@@ -1,9 +1,11 @@
 ---
 id: slicer
 description: "Owner for a bounded outcome. Implements, validates, reviews, repairs, sends updates, and returns one terminal result."
-model: slicer
 requestedAccess: workspace-write
 definitions: [assurance-results, slice-identity]
+targets:
+  claude: { model: sonnet, effort: xhigh }
+  codex: { model: gpt-5.6-terra, effort: xhigh }
 ---
 
 # Deliver Slice

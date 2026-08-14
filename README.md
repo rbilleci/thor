@@ -13,8 +13,7 @@ The normative design and source-format contract are in
 - One portable agent definition per `assets/agents/<id>.md` file.
 - Optional reusable `assets/definitions/<id>.md` bundles expanded by validated identifiers.
 - Optional `assets/templates/<id>.md` wrappers for shared build-time instruction text.
-- A small `assets/thor.yaml` manifest for package metadata plus global logical model
-  mappings, each of which supplies target model and Codex-aligned effort.
+- Explicit Claude and Codex model and effort mappings in every agent definition.
 - Pack-author rendering directly into Claude Code (`.md`) and Codex (`.toml`)
   project discovery directories for dogfooding.
 - Standard `assets/skills/<name>/SKILL.md` directories with optional source-only
@@ -26,7 +25,7 @@ The normative design and source-format contract are in
 
 ## Repository layout
 
-- `assets/` — complete Thor pack source: manifest, agents, instruction templates, and skills.
+- `assets/` — complete Thor pack source: agents, instruction templates, and skills.
 - `schema/` — canonical versioned Thor JSON Schema.
 - `crates/thor-core/` — strict source parsing, validation, skills handling,
   and target renderers.
@@ -44,7 +43,6 @@ An agent-pack repository contains no installer code:
 ```text
 my-pack/
 └── assets/
-    ├── thor.yaml
     ├── agents/
     │   └── pr-reviewer.md
     ├── definitions/
@@ -58,10 +56,10 @@ my-pack/
             └── SKILL.md
 ```
 
-`assets/thor.yaml` owns the package-wide target list and logical model mappings; each
-target mapping supplies both model and effort. Each agent owns its description,
-instructions, model id, access profile, and allowed Claude-only settings. See the complete examples
-and the Claude/Codex field mapping in [docs/design.md](docs/design.md).
+Each agent owns its description, instructions, access profile, and concrete model
+and effort for each selected target. Thor infers the non-empty pack target set from
+the target keys in every agent and rejects inconsistent sets. See the complete
+examples and the Claude/Codex field mapping in [docs/design.md](docs/design.md).
 
 Pack CI validates and creates a release bundle. It must supply the immutable
 commit resolved from the release tag and a CI-held 32-byte Ed25519 signing seed
@@ -75,6 +73,8 @@ thor-build bundle \
   --signing-key "$THOR_PACK_SIGNING_KEY_FILE" \
   --source-repository acme/my-pack \
   --source-commit "$(git rev-parse HEAD)" \
+  --package-name my-pack \
+  --package-version 1.2.0 \
   --claude-compatibility '>=1.0.0' \
   --codex-compatibility '>=0.0.0'
 ```

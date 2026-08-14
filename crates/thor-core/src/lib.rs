@@ -10,13 +10,10 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use semver::Version;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use walkdir::WalkDir;
 
-pub const API_VERSION: &str = "thor/v1alpha1";
-pub const KIND: &str = "AgentPack";
 pub const SCHEMA: &str = include_str!("../../../schema/thor-v1.schema.json");
 const AGENT_INSTRUCTIONS_SLOT: &str = "{{agent_instructions}}";
 const DEFINITION_BUNDLES_SLOT: &str = "{{definition_bundles}}";
@@ -71,38 +68,6 @@ impl Harness {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct PackageManifest {
-    #[serde(rename = "apiVersion")]
-    pub api_version: String,
-    pub kind: String,
-    pub metadata: PackageMetadata,
-    pub spec: PackageSpec,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct PackageMetadata {
-    pub name: String,
-    pub version: String,
-    pub description: String,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct PackageSpec {
-    pub targets: Vec<Harness>,
-    pub models: BTreeMap<String, ModelMapping>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ModelMapping {
-    pub description: String,
-    pub targets: BTreeMap<Harness, TargetModel>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct TargetModel {
     pub model: String,
     pub effort: Effort,
@@ -135,25 +100,26 @@ impl Effort {
 pub struct AgentFrontmatter {
     pub id: String,
     pub description: String,
-    pub model: String,
     #[serde(rename = "requestedAccess")]
     pub requested_access: RequestedAccess,
     pub template: Option<String>,
     #[serde(default)]
     pub definitions: Vec<String>,
-    #[serde(default)]
     pub targets: AgentTargets,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentTargets {
     pub claude: Option<ClaudeSettings>,
+    pub codex: Option<TargetModel>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ClaudeSettings {
+    pub model: String,
+    pub effort: Effort,
     pub max_turns: Option<u32>,
     pub background: Option<bool>,
     pub isolation: Option<ClaudeIsolation>,
@@ -182,8 +148,7 @@ pub struct AgentDefinition {
 
 #[derive(Debug, Clone)]
 pub struct SourcePack {
-    pub manifest: PackageManifest,
-    pub manifest_path: PathBuf,
+    pub targets: Vec<Harness>,
     pub agents: Vec<AgentDefinition>,
     definition_bundles: DefinitionBundles,
 }
@@ -256,8 +221,6 @@ type DefinitionBundles = BTreeMap<String, String>;
 impl SourcePack {
     pub fn load(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref();
-        let manifest_path = root.join("thor.yaml");
-        let manifest = parse_package_file(&manifest_path)?;
         let definition_bundles = load_definition_sources(root)?;
         let agents_dir = root.join("agents");
         ensure_real_directory(&agents_dir, "agents directory")?;
@@ -291,36 +254,43 @@ impl SourcePack {
         }
         agents.sort_by(|left, right| left.frontmatter.id.cmp(&right.frontmatter.id));
 
-        validate_pack(&manifest, &manifest_path, &agents)?;
+        let targets = validate_pack(&agents)?;
         Ok(Self {
-            manifest,
-            manifest_path,
+            targets,
             agents,
             definition_bundles,
         })
     }
 
     pub fn resolve(&self, agent: &AgentDefinition, target: Harness) -> Result<ResolvedAgent> {
-        if !self.manifest.spec.targets.contains(&target) {
+        if !self.targets.contains(&target) {
             return validation(
-                &self.manifest_path,
+                &agent.source_path,
                 format!("target {} is not enabled for this pack", target.as_str()),
             );
         }
-        let mapping = self
-            .manifest
-            .spec
-            .models
-            .get(&agent.frontmatter.model)
-            .and_then(|mapping| mapping.targets.get(&target))
-            .ok_or_else(|| ThorError::Validation {
-                path: agent.source_path.clone(),
-                message: format!(
-                    "model {} has no {} mapping",
-                    agent.frontmatter.model,
-                    target.as_str()
-                ),
-            })?;
+        let (model, effort) = match target {
+            Harness::Claude => agent
+                .frontmatter
+                .targets
+                .claude
+                .as_ref()
+                .map(|settings| (&settings.model, settings.effort))
+                .ok_or_else(|| ThorError::Validation {
+                    path: agent.source_path.clone(),
+                    message: "missing claude target model configuration".to_owned(),
+                })?,
+            Harness::Codex => agent
+                .frontmatter
+                .targets
+                .codex
+                .as_ref()
+                .map(|settings| (&settings.model, settings.effort))
+                .ok_or_else(|| ThorError::Validation {
+                    path: agent.source_path.clone(),
+                    message: "missing codex target model configuration".to_owned(),
+                })?,
+        };
 
         Ok(ResolvedAgent {
             id: agent.frontmatter.id.clone(),
@@ -328,28 +298,14 @@ impl SourcePack {
             instructions: agent.instructions.clone(),
             requested_access: agent.frontmatter.requested_access,
             claude_settings: agent.frontmatter.targets.claude.clone(),
-            model: mapping.model.clone(),
-            effort: mapping.effort.as_str().to_owned(),
+            model: model.clone(),
+            effort: effort.as_str().to_owned(),
         })
     }
 
     pub fn definition_bundles(&self) -> &BTreeMap<String, String> {
         &self.definition_bundles
     }
-}
-
-pub fn parse_package_file(path: impl AsRef<Path>) -> Result<PackageManifest> {
-    let path = path.as_ref();
-    ensure_regular_source_file(path, "package manifest")?;
-    let text = read_utf8(path)?;
-    validate_against_schema(path, &text, "packageManifest")?;
-    let manifest: PackageManifest =
-        serde_yaml::from_str(&text).map_err(|source| ThorError::Yaml {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    validate_manifest(&manifest, path)?;
-    Ok(manifest)
 }
 
 pub fn parse_agent_file(path: impl AsRef<Path>) -> Result<AgentDefinition> {
@@ -1010,12 +966,9 @@ pub fn render_codex(agent: &ResolvedAgent) -> Result<String> {
     })
 }
 
-fn validate_pack(
-    manifest: &PackageManifest,
-    manifest_path: &Path,
-    agents: &[AgentDefinition],
-) -> Result<()> {
+fn validate_pack(agents: &[AgentDefinition]) -> Result<Vec<Harness>> {
     let mut ids = BTreeSet::new();
+    let mut selected_targets: Option<BTreeSet<Harness>> = None;
     for agent in agents {
         if !ids.insert(&agent.frontmatter.id) {
             return validation(
@@ -1023,52 +976,85 @@ fn validate_pack(
                 format!("duplicate agent id {}", agent.frontmatter.id),
             );
         }
-        if !manifest.spec.models.contains_key(&agent.frontmatter.model) {
+        let targets = agent_targets(agent);
+        if targets.is_empty() {
             return validation(
                 &agent.source_path,
-                format!("unknown model tier {}", agent.frontmatter.model),
+                "agent targets must contain at least one target model configuration",
             );
         }
-    }
-    validate_manifest(manifest, manifest_path)
-}
-
-fn validate_manifest(manifest: &PackageManifest, path: &Path) -> Result<()> {
-    if manifest.api_version != API_VERSION {
-        return validation(path, format!("apiVersion must be {API_VERSION}"));
-    }
-    if manifest.kind != KIND {
-        return validation(path, format!("kind must be {KIND}"));
-    }
-    validate_identifier(path, "metadata.name", &manifest.metadata.name)?;
-    Version::parse(&manifest.metadata.version).map_err(|_| ThorError::Validation {
-        path: path.to_path_buf(),
-        message: "metadata.version must be semantic versioning without a v prefix".to_owned(),
-    })?;
-    if manifest.metadata.description.trim().is_empty() {
-        return validation(path, "metadata.description must not be empty");
-    }
-
-    let configured_targets: BTreeSet<_> = manifest.spec.targets.iter().collect();
-    if configured_targets.len() != manifest.spec.targets.len() {
-        return validation(path, "spec.targets must not contain duplicates");
-    }
-    for (model_id, model) in &manifest.spec.models {
-        validate_identifier(path, "model tier", model_id)?;
-        if model.description.trim().is_empty() {
-            return validation(path, "model description must not be empty");
-        }
-        for target in &manifest.spec.targets {
-            if model
-                .targets
-                .get(target)
-                .is_none_or(|mapping| mapping.model.trim().is_empty())
-            {
+        validate_target_models(agent)?;
+        if let Some(expected) = &selected_targets {
+            if expected != &targets {
+                let missing = expected
+                    .difference(&targets)
+                    .map(Harness::as_str)
+                    .collect::<Vec<_>>();
+                let unexpected = targets
+                    .difference(expected)
+                    .map(Harness::as_str)
+                    .collect::<Vec<_>>();
+                let mut differences = Vec::new();
+                if !missing.is_empty() {
+                    differences.push(format!("missing {}", missing.join(", ")));
+                }
+                if !unexpected.is_empty() {
+                    differences.push(format!("unexpected {}", unexpected.join(", ")));
+                }
                 return validation(
-                    path,
-                    format!("every model must map target {}", target.as_str()),
+                    &agent.source_path,
+                    format!(
+                        "agent target set is inconsistent with other agents: {}",
+                        differences.join("; ")
+                    ),
                 );
             }
+        } else {
+            selected_targets = Some(targets);
+        }
+    }
+    Ok(selected_targets
+        .expect("SourcePack rejects empty agent directories")
+        .into_iter()
+        .collect())
+}
+
+fn agent_targets(agent: &AgentDefinition) -> BTreeSet<Harness> {
+    [
+        (Harness::Claude, agent.frontmatter.targets.claude.is_some()),
+        (Harness::Codex, agent.frontmatter.targets.codex.is_some()),
+    ]
+    .into_iter()
+    .filter_map(|(target, configured)| configured.then_some(target))
+    .collect()
+}
+
+fn validate_target_models(agent: &AgentDefinition) -> Result<()> {
+    for (target, model) in [
+        (
+            Harness::Claude,
+            agent
+                .frontmatter
+                .targets
+                .claude
+                .as_ref()
+                .map(|settings| &settings.model),
+        ),
+        (
+            Harness::Codex,
+            agent
+                .frontmatter
+                .targets
+                .codex
+                .as_ref()
+                .map(|settings| &settings.model),
+        ),
+    ] {
+        if model.is_some_and(|model| model.trim().is_empty()) {
+            return validation(
+                &agent.source_path,
+                format!("{} target model must not be empty", target.as_str()),
+            );
         }
     }
     Ok(())
@@ -1328,37 +1314,19 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    const MANIFEST: &str = r#"
-apiVersion: thor/v1alpha1
-kind: AgentPack
-metadata:
-  name: acme-engineering
-  version: 1.2.0
-  description: Engineering agents.
-spec:
-  targets: [claude, codex]
-  models:
-    fast:
-      description: Fast work.
-      targets:
-        claude: { model: haiku, effort: low }
-        codex: { model: gpt-5.6-luna, effort: low }
-    frontier:
-      description: Deep work.
-      targets:
-        claude: { model: opus, effort: xhigh }
-        codex: { model: gpt-5.6, effort: xhigh }
-"#;
-
     const AGENT: &str = r#"---
 id: pr-reviewer
 description: Reviews a pull request for correctness and test gaps.
-model: frontier
 requestedAccess: read-only
 targets:
   claude:
+    model: opus
+    effort: xhigh
     maxTurns: 20
     background: false
+  codex:
+    model: gpt-5.6
+    effort: xhigh
 ---
 
 Review the requested change and report actionable findings only.
@@ -1366,20 +1334,80 @@ Review the requested change and report actionable findings only.
 
     fn fixture_pack() -> tempfile::TempDir {
         let directory = tempdir().unwrap();
-        fs::write(directory.path().join("thor.yaml"), MANIFEST).unwrap();
         fs::create_dir(directory.path().join("agents")).unwrap();
         fs::write(directory.path().join("agents/pr-reviewer.md"), AGENT).unwrap();
         directory
     }
 
     #[test]
-    fn loads_and_resolves_a_pack() {
+    fn loads_without_a_package_manifest_and_resolves_inline_target_models() {
         let directory = fixture_pack();
         let pack = SourcePack::load(directory.path()).unwrap();
         assert_eq!(pack.agents.len(), 1);
+        assert_eq!(pack.targets, Harness::ALL);
         let resolved = pack.resolve(&pack.agents[0], Harness::Codex).unwrap();
         assert_eq!(resolved.model, "gpt-5.6");
         assert_eq!(resolved.effort, "xhigh");
+    }
+
+    #[test]
+    fn rejects_empty_missing_unknown_and_inconsistent_target_model_configurations() {
+        let empty = fixture_pack();
+        fs::write(
+            empty.path().join("agents/pr-reviewer.md"),
+            AGENT.replace(
+                "targets:\n  claude:\n    model: opus\n    effort: xhigh\n    maxTurns: 20\n    background: false\n  codex:\n    model: gpt-5.6\n    effort: xhigh\n",
+                "targets: {}\n",
+            ),
+        )
+        .unwrap();
+        assert!(
+            SourcePack::load(empty.path())
+                .unwrap_err()
+                .to_string()
+                .contains("schema validation failed")
+        );
+
+        let missing = fixture_pack();
+        fs::write(
+            missing.path().join("agents/pr-reviewer.md"),
+            AGENT.replace("    model: gpt-5.6\n", ""),
+        )
+        .unwrap();
+        assert!(
+            SourcePack::load(missing.path())
+                .unwrap_err()
+                .to_string()
+                .contains("schema validation failed")
+        );
+
+        let unknown = fixture_pack();
+        fs::write(
+            unknown.path().join("agents/pr-reviewer.md"),
+            AGENT.replace("  codex:\n", "  rogue:\n"),
+        )
+        .unwrap();
+        assert!(
+            SourcePack::load(unknown.path())
+                .unwrap_err()
+                .to_string()
+                .contains("schema validation failed")
+        );
+
+        let inconsistent = fixture_pack();
+        fs::write(
+            inconsistent.path().join("agents/second-reviewer.md"),
+            AGENT
+                .replace("id: pr-reviewer", "id: second-reviewer")
+                .replace("  codex:\n    model: gpt-5.6\n    effort: xhigh\n", ""),
+        )
+        .unwrap();
+        assert!(
+            SourcePack::load(inconsistent.path())
+                .unwrap_err()
+                .to_string()
+                .contains("agent target set is inconsistent")
+        );
     }
 
     #[test]
@@ -1787,12 +1815,15 @@ Review the requested change and report actionable findings only.
     }
 
     #[test]
-    fn rejects_agent_level_effort() {
+    fn rejects_top_level_model_references() {
         let directory = fixture_pack();
         let agent_path = directory.path().join("agents/pr-reviewer.md");
         fs::write(
             &agent_path,
-            AGENT.replace("model: frontier", "model: frontier\neffort: high"),
+            AGENT.replace(
+                "requestedAccess: read-only",
+                "model: frontier\nrequestedAccess: read-only",
+            ),
         )
         .unwrap();
         let error = SourcePack::load(directory.path()).unwrap_err();
@@ -1815,13 +1846,9 @@ Review the requested change and report actionable findings only.
     #[test]
     fn rejects_an_unsupported_model_effort() {
         let directory = fixture_pack();
-        let manifest_path = directory.path().join("thor.yaml");
         fs::write(
-            &manifest_path,
-            MANIFEST.replace(
-                "model: gpt-5.6, effort: xhigh",
-                "model: gpt-5.6, effort: ultra",
-            ),
+            directory.path().join("agents/pr-reviewer.md"),
+            AGENT.replace("effort: xhigh", "effort: ultra"),
         )
         .unwrap();
         let error = SourcePack::load(directory.path()).unwrap_err();
@@ -1832,17 +1859,30 @@ Review the requested change and report actionable findings only.
     fn published_schema_has_a_normal_validator_entry_point() {
         let schema: serde_json::Value = serde_json::from_str(SCHEMA).unwrap();
         let validator = jsonschema::validator_for(&schema).unwrap();
-        let instance: serde_yaml::Value = serde_yaml::from_str(MANIFEST).unwrap();
+        let instance: serde_yaml::Value = serde_yaml::from_str(
+            AGENT
+                .strip_prefix("---\n")
+                .unwrap()
+                .split_once("\n---\n")
+                .unwrap()
+                .0,
+        )
+        .unwrap();
         assert!(
             validator
                 .validate(&serde_json::to_value(instance).unwrap())
                 .is_ok()
         );
 
-        let invalid: serde_yaml::Value = serde_yaml::from_str(&MANIFEST.replace(
-            "codex: { model: gpt-5.6, effort: xhigh }",
-            "rogue: { model: gpt-5.6, effort: xhigh }",
-        ))
+        let invalid: serde_yaml::Value = serde_yaml::from_str(
+            AGENT
+                .replace("  codex:\n", "  rogue:\n")
+                .strip_prefix("---\n")
+                .unwrap()
+                .split_once("\n---\n")
+                .unwrap()
+                .0,
+        )
         .unwrap();
         assert!(
             validator
@@ -2023,19 +2063,8 @@ Review the requested change and report actionable findings only.
 
     #[cfg(unix)]
     #[test]
-    fn rejects_linked_manifest_agents_directory_and_agent_files() {
+    fn rejects_linked_agents_directory_and_agent_files() {
         use std::os::unix::fs::symlink;
-
-        let manifest_link = fixture_pack();
-        let manifest = manifest_link.path().join("thor.yaml");
-        fs::rename(&manifest, manifest_link.path().join("real-manifest.yaml")).unwrap();
-        symlink("real-manifest.yaml", &manifest).unwrap();
-        assert!(
-            SourcePack::load(manifest_link.path())
-                .unwrap_err()
-                .to_string()
-                .contains("package manifest must be a regular file")
-        );
 
         let directory_link = fixture_pack();
         let agents = directory_link.path().join("agents");

@@ -1,10 +1,12 @@
 ---
 id: lens-architecture-boundaries-reviewer
 description: "Read-only focused reviewer for responsibility ownership, dependency direction, isolation, coupling, and architectural boundary integrity."
-model: lens-reviewer
 requestedAccess: read-only
 template: focused-reviewer
 definitions: [assurance-results, slice-identity]
+targets:
+  claude: { model: haiku, effort: high }
+  codex: { model: gpt-5.6-luna, effort: high }
 ---
 
 Review architecture boundaries only. Do not redesign unrelated components or treat preference as a defect.

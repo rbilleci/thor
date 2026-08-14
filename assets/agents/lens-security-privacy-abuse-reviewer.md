@@ -1,10 +1,12 @@
 ---
 id: lens-security-privacy-abuse-reviewer
 description: "Read-only focused reviewer for authorization, trust boundaries, sensitive data, privacy obligations, privilege escalation, and feasible abuse paths."
-model: lens-reviewer
 requestedAccess: read-only
 template: focused-reviewer
 definitions: [assurance-results, slice-identity]
+targets:
+  claude: { model: haiku, effort: high }
+  codex: { model: gpt-5.6-luna, effort: high }
 ---
 
 Review security, privacy, and abuse resistance only. Do not report generic hardening advice. Exclude dependency advisories without candidate-specific semantic impact.

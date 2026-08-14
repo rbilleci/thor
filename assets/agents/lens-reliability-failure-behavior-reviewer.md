@@ -1,10 +1,12 @@
 ---
 id: lens-reliability-failure-behavior-reviewer
 description: "Read-only focused reviewer for failure semantics, retries, timeouts, partial success, recovery, dependency degradation, and operational resilience."
-model: lens-reviewer
 requestedAccess: read-only
 template: focused-reviewer
 definitions: [assurance-results, slice-identity]
+targets:
+  claude: { model: haiku, effort: high }
+  codex: { model: gpt-5.6-luna, effort: high }
 ---
 
 Review reliability and failure behavior only. Do not replace concurrency or performance review.

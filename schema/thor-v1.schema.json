@@ -1,27 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/acme/thor/schema/thor-v1.schema.json",
-  "title": "Thor v1 source schema",
-  "oneOf": [
-    { "$ref": "#/$defs/packageManifest" },
-    { "$ref": "#/$defs/agentFrontmatter" }
-  ],
+  "title": "Thor v1 agent source schema",
+  "$ref": "#/$defs/agentFrontmatter",
   "$defs": {
     "identifier": {
       "type": "string",
       "pattern": "^[a-z][a-z0-9-]{0,63}$"
-    },
-    "target": {
-      "type": "string",
-      "enum": ["claude", "codex"]
-    },
-    "targetModelMap": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "claude": { "$ref": "#/$defs/targetModel" },
-        "codex": { "$ref": "#/$defs/targetModel" }
-      }
     },
     "targetModel": {
       "type": "object",
@@ -32,60 +17,25 @@
         "effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"] }
       }
     },
-    "packageManifest": {
+    "claudeTarget": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["apiVersion", "kind", "metadata", "spec"],
+      "required": ["model", "effort"],
       "properties": {
-        "apiVersion": { "const": "thor/v1alpha1" },
-        "kind": { "const": "AgentPack" },
-        "metadata": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["name", "version", "description"],
-          "properties": {
-            "name": { "$ref": "#/$defs/identifier" },
-            "version": { "type": "string", "minLength": 1 },
-            "description": { "type": "string", "minLength": 1 }
-          }
-        },
-        "spec": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["targets", "models"],
-          "properties": {
-            "targets": {
-              "type": "array",
-              "minItems": 1,
-              "uniqueItems": true,
-              "items": { "$ref": "#/$defs/target" }
-            },
-            "models": {
-              "type": "object",
-              "minProperties": 1,
-              "propertyNames": { "$ref": "#/$defs/identifier" },
-              "additionalProperties": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["description", "targets"],
-                "properties": {
-                  "description": { "type": "string", "minLength": 1 },
-                  "targets": { "$ref": "#/$defs/targetModelMap" }
-                }
-              }
-            }
-          }
-        }
+        "model": { "type": "string", "minLength": 1 },
+        "effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"] },
+        "maxTurns": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "background": { "type": "boolean" },
+        "isolation": { "const": "worktree" }
       }
     },
     "agentFrontmatter": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "description", "model", "requestedAccess"],
+      "required": ["id", "description", "requestedAccess", "targets"],
       "properties": {
         "id": { "$ref": "#/$defs/identifier" },
         "description": { "type": "string", "minLength": 1, "pattern": "^[^\\r\\n]+$" },
-        "model": { "$ref": "#/$defs/identifier" },
         "requestedAccess": { "type": "string", "enum": ["inherit", "read-only", "workspace-write"] },
         "template": { "$ref": "#/$defs/identifier" },
         "definitions": {
@@ -96,17 +46,11 @@
         },
         "targets": {
           "type": "object",
+          "minProperties": 1,
           "additionalProperties": false,
           "properties": {
-            "claude": {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "maxTurns": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
-                "background": { "type": "boolean" },
-                "isolation": { "const": "worktree" }
-              }
-            }
+            "claude": { "$ref": "#/$defs/claudeTarget" },
+            "codex": { "$ref": "#/$defs/targetModel" }
           }
         }
       }

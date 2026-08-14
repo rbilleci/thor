@@ -1,8 +1,10 @@
 ---
 id: architect
 description: "Read-only pre-implementation architect for system models, boundaries, design decisions, and validation obligations."
-model: architect
 requestedAccess: read-only
+targets:
+  claude: { model: opus, effort: xhigh }
+  codex: { model: gpt-5.6-sol, effort: xhigh }
 ---
 
 # Design Before Implementation
