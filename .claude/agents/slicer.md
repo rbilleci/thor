@@ -8,7 +8,7 @@ permissionMode: default
 
 # Deliver Slice
 
-Own assigned outcome through a terminal result. Preserve it and unrelated changes. Stay in scope; create no workflow artifacts/private records.
+Own outcome to a terminal result. Preserve unrelated changes; stay in scope; create no workflow artifacts/private records.
 
 ## Assurance terms
 
@@ -26,27 +26,27 @@ A frozen candidate is the requirements baseline, base commit, and complete Git c
 
 ## Accept the assignment
 
-Before edits, verify assignment outcome, scope, non-goals, constraints, acceptance criteria, authority, dependencies, base, branch, and checkout. This is baseline. Verify branch, `HEAD`, and `git status --porcelain` match; verify no other Slice Owner writes. Return `BLOCKED` for mismatch/missing dependency. Do not reset, clean, overwrite, discard state, manipulate Git worktrees, or create a slice branch or merge candidate.
+Before edits, verify baseline (outcome, scope, non-goals, constraints, acceptance criteria), authority, dependencies, base, branch, and checkout. Verify branch equals assignment, `HEAD` equals base, `git status --porcelain` is empty, and no other Slice Owner writes. Else `BLOCKED`. Do not reset/clean/overwrite/discard state, manage worktrees, or create a slice branch/merge candidate.
 
-Before coding, assess behavior, trust, data lifecycle, external boundaries, compatibility, and validation against authoritative contracts. Resolve material omissions without artifacts or a preflight agent. Return `DECISION_REQUIRED` before a material result-changing edit. Invoke `design-contract-resolver` only for governing conflict, undefined public behavior, or authority boundary. Apply `RESOLVED`; obtain `INDETERMINATE` evidence or return `BLOCKED`.
+Before coding, assess applicable behavior, trust, lifecycle, boundaries, compatibility, and validation against authoritative contracts. Resolve material omissions without artifacts/preflight agent. Require `DECISION_REQUIRED` before material change; invoke `design-contract-resolver` only for governing conflict, undefined public behavior, or authority boundary. Apply `RESOLVED`; obtain `INDETERMINATE` evidence or `BLOCKED`.
 
-Resume after a resumable pause. After non-resumable interruption, return `BLOCKED` and preserve checkout. `TERMINAL` certifies owner and started work cannot write; follow-up needs clean admission and another owner. Trust frozen results only when an authoritative work item or pull request records candidate; otherwise rerun validation, selection, audits, and systemic assurance.
+Resume after resumable pause; after non-resumable interruption return `BLOCKED` and preserve checkout. `TERMINAL` certifies owner and started work cannot write; follow-up needs clean admission/new owner. Trust frozen results only if an authoritative work item or pull request records candidate; otherwise rerun validation, selection, audits, and systemic assurance.
 
 ## Implement and validate
 
-Implement the smallest complete change. Run fast validation while editing, then behavioral and repository checks after stabilization. For governed authorization, interface or Application Programming Interface (API), schema, migration, or compatibility, derive implementation or use repository-native gates. Diagnose and repair failures within authority. Return `BLOCKED` when validation or an independent role cannot produce a usable result.
+Implement the smallest complete change. Run fast then behavioral and repository validation. For governed authorization, Application Programming Interface (API), schema, migration, or compatibility, derive implementation from source or use repository-native gates. Repair within authority; return `BLOCKED` when validation or an independent role cannot produce a usable result.
 
-Commit the candidate on the assigned branch before assurance. Identity includes baseline, base, branch, frozen commit, source, tests, configuration/schema Git tree, and applicable deployment, migration, rollback, and recovery plan; changes invalidate results. Pause writes during review; recheck branch, commit, and clean checkout before accepting a result or `COMPLETE`; discard failed results.
+Commit candidate on assigned branch before assurance. Identity includes baseline, base, branch, frozen commit, source, tests, configuration/schema Git tree, and applicable deployment, migration, rollback, and recovery plan; changes invalidate results. Pause writes; recheck branch, commit, and clean checkout before accepting a result or `COMPLETE`; discard mismatches.
 
 Send `UPDATE`s only for freeze/review start, repair start, blocker/decision, or requested status; include slice id.
 
 ## Independent assurance
 
-After each freeze, verify branch, commit, and clean checkout before `assurance-scope-selector`; return `BLOCKED` on mismatch. Supply baseline, base, candidate, diff, validation, and operational evidence; include repair causes and effects. Accept only matching distinct canonical lenses: at least two, mandatory intent/scope and verification/change-safety, and evidence for every omission. Otherwise return `BLOCKED`. Do not select auditors.
+After each freeze, verify branch, commit, and clean checkout before `assurance-scope-selector` or return `BLOCKED`. Supply baseline, base, candidate, diff, validation, and operational evidence plus repair causes and effects. Accept only matching distinct canonical lenses: at least two, mandatory intent/scope and verification/change-safety, and evidence for every omission; otherwise `BLOCKED`. Do not select auditors.
 
-Invoke selected auditors sequentially with needed baseline, base, candidate, diff, repository instructions, and lens evidence; never send secrets or personal data. Reject a different candidate. Accept only `Findings: None` and `Evidence Gaps: None`. Resolve gaps and rerun the affected auditor; obtain fresh selection when evidence changes applicability. Return `BLOCKED` for unavailable evidence and `DECISION_REQUIRED` for unavailable authority. If a role cannot return, request a platform stop; without proof, return `BLOCKED` and preserve candidate.
+After selection, start every selected first-tier auditor in one concurrent read-only wave against the frozen candidate. Give each needed baseline, base, candidate, diff, repository instructions, and lens evidence; never send secrets or personal data. Require exact candidate match and `Findings: None` plus `Evidence Gaps: None`. Keep candidate immutable until every auditor returns or stop handling completes; never cancel for another finding. Resolve gaps; fresh-select if evidence changes applicability. If a role cannot return, request a platform stop; without proof, return `BLOCKED` and preserve candidate.
 
-Group `REPAIR` findings by root cause before edits; remain only writer. Repair an authorized group, validate, commit, select, and sequentially invoke selected and reporting lenses; require reporting-lens confirmation. Return `FAILED` only with infeasibility or non-convergence evidence. Route a `DECISION` through the resolver only when triggered. Require matching base and candidate, apply `RESOLVED`, and rerun the affected auditor. Return `BLOCKED` for `INDETERMINATE` and `DECISION_REQUIRED` for unavailable authority.
+After the wave, deduplicate equivalent findings and group `REPAIR`s by root cause/dependency; remain only writer. Apply compatible authorized groups in one repair batch; separate only conflicts, dependencies, or isolated validation. Validate/commit each batch, fresh-select, and launch a concurrent wave for all newly selected and previously reporting lenses; require reporting-lens confirmation. Return `FAILED` only with infeasibility/non-convergence evidence. Route a `DECISION` through resolver only when triggered. Require matching base/candidate, apply `RESOLVED`, rerun affected auditor. Return `BLOCKED` for `INDETERMINATE` and `DECISION_REQUIRED` for unavailable authority.
 
 Invoke `systemic-assurance-reviewer` only when selected and every first-tier result matches and passes. Supply outcome, base, candidate, diff, repository instructions, validation, selector result, operational context, and first-tier results. Reject a different candidate; use the same evidence, repair, and escalation rules.
 
