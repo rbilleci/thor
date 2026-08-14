@@ -11,8 +11,9 @@ use clap::{Parser, Subcommand};
 use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
 use thor_core::{
-    ArtifactManifest, ArtifactPackage, Harness, PayloadDigest, SignatureEnvelope, SourcePack,
-    collect_skill_payloads, collect_static_payloads, render_claude, render_codex,
+    ArtifactManifest, ArtifactPackage, Harness, MAX_UNCOMPRESSED_BUNDLE_BYTES, PayloadDigest,
+    SignatureEnvelope, SourcePack, collect_skill_payloads, collect_static_payloads, render_claude,
+    render_codex,
 };
 use zip::{CompressionMethod, ZipWriter, write::FileOptions};
 
@@ -891,9 +892,24 @@ fn bundle(
     let manifest_bytes = canonical_json(&manifest)?;
     let mut archive_entries = payloads;
     archive_entries.insert("manifest.json".to_owned(), manifest_bytes);
+    validate_uncompressed_bundle_size(archive_entries.values().map(|bytes| bytes.len() as u64))?;
     let archive = deterministic_zip(&archive_entries)?;
     let envelope = signature_envelope(&archive, signing_key_path)?;
     Ok((archive, canonical_json(&envelope)?))
+}
+
+fn validate_uncompressed_bundle_size(sizes: impl IntoIterator<Item = u64>) -> Result<()> {
+    let total = sizes.into_iter().try_fold(0u64, |total, size| {
+        total
+            .checked_add(size)
+            .ok_or_else(|| anyhow!("bundle uncompressed size overflow"))
+    })?;
+    if total > MAX_UNCOMPRESSED_BUNDLE_BYTES {
+        bail!(
+            "bundle exceeds {MAX_UNCOMPRESSED_BUNDLE_BYTES}-byte uncompressed size limit before signing"
+        );
+    }
+    Ok(())
 }
 
 fn validate_bundle_metadata(metadata: &BundleMetadata) -> Result<()> {
@@ -1520,6 +1536,47 @@ Review the change.
             manifest
                 .payloads
                 .contains_key("targets/codex/static/config.toml")
+        );
+    }
+
+    #[test]
+    fn rejects_bundle_content_over_the_installer_uncompressed_limit() {
+        assert!(validate_uncompressed_bundle_size([MAX_UNCOMPRESSED_BUNDLE_BYTES]).is_ok());
+        let error =
+            validate_uncompressed_bundle_size([MAX_UNCOMPRESSED_BUNDLE_BYTES, 1]).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("uncompressed size limit before signing"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn bundle_rejects_an_oversized_payload_before_signing() {
+        let source = tempdir().unwrap();
+        write_source(source.path());
+        let static_root = source.path().join(".claude");
+        fs::create_dir(&static_root).unwrap();
+        fs::File::create(static_root.join("oversized.bin"))
+            .unwrap()
+            .set_len(MAX_UNCOMPRESSED_BUNDLE_BYTES + 1)
+            .unwrap();
+        let metadata = BundleMetadata {
+            source_repository: "acme/agent-pack".to_owned(),
+            source_commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            minimum_thor_version: "0.1.0".to_owned(),
+            claude_compatibility: Some(">=1.0.0".to_owned()),
+            codex_compatibility: Some(">=1.0.0".to_owned()),
+        };
+
+        let error =
+            bundle(source.path(), &source.path().join("missing-key"), &metadata).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("uncompressed size limit before signing"),
+            "unexpected error: {error}"
         );
     }
 

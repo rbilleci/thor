@@ -18,6 +18,7 @@ use walkdir::WalkDir;
 pub const API_VERSION: &str = "thor/v1alpha1";
 pub const KIND: &str = "AgentPack";
 pub const SCHEMA: &str = include_str!("../../../schema/thor-v1.schema.json");
+pub const MAX_UNCOMPRESSED_BUNDLE_BYTES: u64 = 100 * 1024 * 1024;
 const AGENT_INSTRUCTIONS_SLOT: &str = "{{agent_instructions}}";
 const DEFINITION_BUNDLES_SLOT: &str = "{{definition_bundles}}";
 const SKILL_DEFINITION_DIRECTIVE_PREFIX: &str = "<!-- thor:definitions: ";
@@ -347,6 +348,8 @@ pub fn parse_agent_file(path: impl AsRef<Path>) -> Result<AgentDefinition> {
     ensure_regular_source_file(path, "agent definition")?;
     let text = read_utf8(path)?;
     let (frontmatter, instructions) = split_frontmatter(path, &text)?;
+    reject_reserved_definition_syntax(path, frontmatter, "agent frontmatter")?;
+    reject_skill_definition_directive(path, instructions, "agent instructions")?;
     validate_against_schema(path, frontmatter, "agentFrontmatter")?;
     let frontmatter: AgentFrontmatter =
         serde_yaml::from_str(frontmatter).map_err(|source| ThorError::Yaml {
@@ -387,6 +390,7 @@ fn expand_agent_instructions(root: &Path, agent: &mut AgentDefinition) -> Result
         let template_path = templates_dir.join(format!("{template_id}.md"));
         ensure_regular_source_file(&template_path, "agent template")?;
         let template = read_utf8(&template_path)?;
+        reject_skill_definition_directive(&template_path, &template, "agent template")?;
 
         let slot_count = template.match_indices(AGENT_INSTRUCTIONS_SLOT).count();
         if slot_count != 1 {
@@ -570,6 +574,26 @@ fn validate_definition_content(path: &Path, definition: &str) -> Result<()> {
     Ok(())
 }
 
+fn reject_reserved_definition_syntax(path: &Path, text: &str, location: &str) -> Result<()> {
+    if text.contains(DEFINITION_BUNDLES_SLOT) {
+        return validation(
+            path,
+            format!("{location} may not contain {DEFINITION_BUNDLES_SLOT}"),
+        );
+    }
+    reject_skill_definition_directive(path, text, location)
+}
+
+fn reject_skill_definition_directive(path: &Path, text: &str, location: &str) -> Result<()> {
+    if text.contains("<!-- thor:definitions") {
+        return validation(
+            path,
+            format!("{location} may not contain a skill definition directive"),
+        );
+    }
+    Ok(())
+}
+
 fn expand_definition_bundles(
     path: &Path,
     text: &str,
@@ -604,6 +628,7 @@ pub fn parse_skill_file(path: impl AsRef<Path>) -> Result<SkillDefinition> {
     ensure_regular_source_file(path, "skill definition")?;
     let text = read_utf8(path)?;
     let (frontmatter, instructions) = split_frontmatter(path, &text)?;
+    reject_reserved_definition_syntax(path, frontmatter, "skill frontmatter")?;
     let frontmatter: SkillFrontmatter =
         serde_yaml::from_str(frontmatter).map_err(|source| ThorError::Yaml {
             path: path.to_path_buf(),
@@ -1527,6 +1552,99 @@ Review the requested change and report actionable findings only.
                 .contains("agent instructions may not contain {{definition_bundles}}"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn rejects_reserved_definition_syntax_outside_supported_source_locations() {
+        for (replacement, expected) in [
+            (
+                "description: \"{{definition_bundles}}\"",
+                "agent frontmatter may not contain {{definition_bundles}}",
+            ),
+            (
+                "description: \"<!-- thor:definitions: known -->\"",
+                "agent frontmatter may not contain a skill definition directive",
+            ),
+        ] {
+            let directory = fixture_pack();
+            let agent = AGENT.replace(
+                "description: Reviews a pull request for correctness and test gaps.",
+                replacement,
+            );
+            fs::write(directory.path().join("agents/pr-reviewer.md"), agent).unwrap();
+
+            let error = SourcePack::load(directory.path()).unwrap_err();
+            assert!(
+                error.to_string().contains(expected),
+                "expected {expected:?} in {error}"
+            );
+        }
+
+        let agent_directive = fixture_pack();
+        let agent = AGENT.replace(
+            "Review the requested change and report actionable findings only.",
+            "<!-- thor:definitions: known -->\n\nReview the change.",
+        );
+        fs::write(agent_directive.path().join("agents/pr-reviewer.md"), agent).unwrap();
+        let error = SourcePack::load(agent_directive.path()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("agent instructions may not contain a skill definition directive"),
+            "unexpected error: {error}"
+        );
+
+        let template_directive = fixture_pack();
+        fs::create_dir(template_directive.path().join("templates")).unwrap();
+        fs::write(
+            template_directive.path().join("templates/wrapper.md"),
+            "<!-- thor:definitions: known -->\n\n{{agent_instructions}}\n",
+        )
+        .unwrap();
+        let agent = AGENT.replace(
+            "requestedAccess: read-only",
+            "requestedAccess: read-only\ntemplate: wrapper",
+        );
+        fs::write(
+            template_directive.path().join("agents/pr-reviewer.md"),
+            agent,
+        )
+        .unwrap();
+        let error = SourcePack::load(template_directive.path()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("agent template may not contain a skill definition directive"),
+            "unexpected error: {error}"
+        );
+
+        for (description, expected) in [
+            (
+                "\"{{definition_bundles}}\"",
+                "skill frontmatter may not contain {{definition_bundles}}",
+            ),
+            (
+                "\"<!-- thor:definitions: known -->\"",
+                "skill frontmatter may not contain a skill definition directive",
+            ),
+        ] {
+            let directory = tempdir().unwrap();
+            let skill = directory.path().join("skills/review-checklist");
+            fs::create_dir_all(&skill).unwrap();
+            fs::write(
+                skill.join("SKILL.md"),
+                format!(
+                    "---\nname: review-checklist\ndescription: {description}\n---\n\nUse this checklist.\n"
+                ),
+            )
+            .unwrap();
+
+            let error = collect_skill_payloads(directory.path().join("skills")).unwrap_err();
+            assert!(
+                error.to_string().contains(expected),
+                "expected {expected:?} in {error}"
+            );
+        }
     }
 
     #[test]

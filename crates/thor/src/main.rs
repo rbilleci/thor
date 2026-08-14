@@ -17,12 +17,11 @@ use reqwest::blocking::Client;
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use thor_core::{ArtifactManifest, Harness, SignatureEnvelope};
+use thor_core::{ArtifactManifest, Harness, MAX_UNCOMPRESSED_BUNDLE_BYTES, SignatureEnvelope};
 use zip::ZipArchive;
 
 const CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
 const MAX_ZIP_ENTRIES: usize = 10_000;
-const MAX_UNCOMPRESSED_BYTES: u64 = 100 * 1024 * 1024;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -570,7 +569,7 @@ fn verify_bundle_with_public_key(
         total_size = total_size
             .checked_add(file.size())
             .ok_or_else(|| anyhow!("bundle size overflow"))?;
-        if total_size > MAX_UNCOMPRESSED_BYTES {
+        if total_size > MAX_UNCOMPRESSED_BUNDLE_BYTES {
             bail!("bundle exceeds uncompressed size limit");
         }
         let mut bytes = Vec::with_capacity(file.size() as usize);
@@ -1111,7 +1110,7 @@ fn github_download(client: &Client, url: &str) -> Result<Vec<u8>> {
         .error_for_status()
         .with_context(|| format!("download failed for {url}"))?;
     let bytes = response.bytes().context("cannot read release asset")?;
-    if bytes.len() as u64 > MAX_UNCOMPRESSED_BYTES {
+    if bytes.len() as u64 > MAX_UNCOMPRESSED_BUNDLE_BYTES {
         bail!("release asset exceeds Thor's bundle size limit");
     }
     Ok(bytes.to_vec())
