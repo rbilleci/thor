@@ -11,10 +11,9 @@ use clap::{Parser, Subcommand};
 use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
 use thor_core::{
-    ArtifactManifest, ArtifactPackage, Harness, MAX_COMPRESSED_BUNDLE_BYTES,
-    MAX_UNCOMPRESSED_BUNDLE_BYTES, PayloadByteBudget, PayloadDigest, SignatureEnvelope, SourcePack,
-    collect_skill_payloads, collect_skill_payloads_with_budget, collect_static_payloads,
-    collect_static_payloads_with_budget, render_claude, render_codex,
+    ArtifactManifest, ArtifactPackage, Harness, PayloadDigest, SignatureEnvelope, SourcePack,
+    collect_skill_payloads, collect_skill_payloads_with_definitions, collect_static_payloads,
+    render_claude, render_codex,
 };
 use zip::{CompressionMethod, ZipWriter, write::FileOptions};
 
@@ -833,16 +832,14 @@ fn bundle(
     validate_bundle_metadata(metadata)?;
     let pack =
         SourcePack::load(source).with_context(|| format!("invalid source {}", source.display()))?;
-    let mut budget = PayloadByteBudget::new(MAX_UNCOMPRESSED_BUNDLE_BYTES);
-    let mut payloads = collect_skill_payloads_with_budget(source.join("skills"), &mut budget)?;
+    let mut payloads =
+        collect_skill_payloads_with_definitions(source.join("skills"), pack.definition_bundles())?;
     let mut targets = pack.manifest.spec.targets.clone();
     targets.sort();
     for target in &targets {
-        for (path, bytes) in collect_static_payloads_with_budget(
-            source.join(format!(".{}", target.as_str())),
-            target.clone(),
-            &mut budget,
-        )? {
+        for (path, bytes) in
+            collect_static_payloads(source.join(format!(".{}", target.as_str())), target.clone())?
+        {
             if payloads.insert(path.clone(), bytes).is_some() {
                 bail!("duplicate bundle payload {path}");
             }
@@ -859,9 +856,10 @@ fn bundle(
                     render_codex(&resolved)?,
                 ),
             };
-            let bytes = content.into_bytes();
-            budget.consume(Path::new(&path), bytes.len() as u64)?;
-            if payloads.insert(path.clone(), bytes).is_some() {
+            if payloads
+                .insert(path.clone(), content.into_bytes())
+                .is_some()
+            {
                 bail!("duplicate bundle payload {path}");
             }
         }
@@ -893,37 +891,11 @@ fn bundle(
             .collect(),
     };
     let manifest_bytes = canonical_json(&manifest)?;
-    budget.consume(Path::new("manifest.json"), manifest_bytes.len() as u64)?;
     let mut archive_entries = payloads;
     archive_entries.insert("manifest.json".to_owned(), manifest_bytes);
-    validate_uncompressed_bundle_size(archive_entries.values().map(|bytes| bytes.len() as u64))?;
     let archive = deterministic_zip(&archive_entries)?;
-    validate_compressed_bundle_size(archive.len() as u64)?;
     let envelope = signature_envelope(&archive, signing_key_path)?;
     Ok((archive, canonical_json(&envelope)?))
-}
-
-fn validate_uncompressed_bundle_size(sizes: impl IntoIterator<Item = u64>) -> Result<()> {
-    let total = sizes.into_iter().try_fold(0u64, |total, size| {
-        total
-            .checked_add(size)
-            .ok_or_else(|| anyhow!("bundle uncompressed size overflow"))
-    })?;
-    if total > MAX_UNCOMPRESSED_BUNDLE_BYTES {
-        bail!(
-            "bundle exceeds {MAX_UNCOMPRESSED_BUNDLE_BYTES}-byte uncompressed size limit before signing"
-        );
-    }
-    Ok(())
-}
-
-fn validate_compressed_bundle_size(bytes: u64) -> Result<()> {
-    if bytes > MAX_COMPRESSED_BUNDLE_BYTES {
-        bail!(
-            "bundle exceeds {MAX_COMPRESSED_BUNDLE_BYTES}-byte compressed size limit before signing"
-        );
-    }
-    Ok(())
 }
 
 fn validate_bundle_metadata(metadata: &BundleMetadata) -> Result<()> {
@@ -1550,59 +1522,6 @@ Review the change.
             manifest
                 .payloads
                 .contains_key("targets/codex/static/config.toml")
-        );
-    }
-
-    #[test]
-    fn rejects_bundle_content_over_the_installer_uncompressed_limit() {
-        assert!(validate_uncompressed_bundle_size([MAX_UNCOMPRESSED_BUNDLE_BYTES]).is_ok());
-        let error =
-            validate_uncompressed_bundle_size([MAX_UNCOMPRESSED_BUNDLE_BYTES, 1]).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("uncompressed size limit before signing"),
-            "unexpected error: {error}"
-        );
-    }
-
-    #[test]
-    fn rejects_bundle_archives_over_the_release_download_limit() {
-        assert!(validate_compressed_bundle_size(MAX_COMPRESSED_BUNDLE_BYTES).is_ok());
-        let error = validate_compressed_bundle_size(MAX_COMPRESSED_BUNDLE_BYTES + 1).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("compressed size limit before signing"),
-            "unexpected error: {error}"
-        );
-    }
-
-    #[test]
-    fn bundle_rejects_an_oversized_static_payload_before_reading_or_signing() {
-        let source = tempdir().unwrap();
-        write_source(source.path());
-        let static_root = source.path().join(".claude");
-        fs::create_dir(&static_root).unwrap();
-        fs::File::create(static_root.join("oversized.bin"))
-            .unwrap()
-            .set_len(MAX_UNCOMPRESSED_BUNDLE_BYTES + 1)
-            .unwrap();
-        let metadata = BundleMetadata {
-            source_repository: "acme/agent-pack".to_owned(),
-            source_commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
-            minimum_thor_version: "0.1.0".to_owned(),
-            claude_compatibility: Some(">=1.0.0".to_owned()),
-            codex_compatibility: Some(">=1.0.0".to_owned()),
-        };
-
-        let error =
-            bundle(source.path(), &source.path().join("missing-key"), &metadata).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("bundle payloads exceed uncompressed size limit"),
-            "unexpected error: {error}"
         );
     }
 

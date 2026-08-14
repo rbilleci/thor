@@ -18,38 +18,12 @@ use walkdir::WalkDir;
 pub const API_VERSION: &str = "thor/v1alpha1";
 pub const KIND: &str = "AgentPack";
 pub const SCHEMA: &str = include_str!("../../../schema/thor-v1.schema.json");
-pub const MAX_COMPRESSED_BUNDLE_BYTES: u64 = 100 * 1024 * 1024;
-pub const MAX_UNCOMPRESSED_BUNDLE_BYTES: u64 = 100 * 1024 * 1024;
 const AGENT_INSTRUCTIONS_SLOT: &str = "{{agent_instructions}}";
 const DEFINITION_BUNDLES_SLOT: &str = "{{definition_bundles}}";
 const SKILL_DEFINITION_DIRECTIVE_PREFIX: &str = "<!-- thor:definitions: ";
 const SKILL_DEFINITION_DIRECTIVE_SUFFIX: &str = " -->";
 
 pub type Result<T> = std::result::Result<T, ThorError>;
-
-#[derive(Debug)]
-pub struct PayloadByteBudget {
-    remaining: u64,
-}
-
-impl PayloadByteBudget {
-    pub fn new(limit: u64) -> Self {
-        Self { remaining: limit }
-    }
-
-    pub fn ensure_can_read(&self, path: &Path, bytes: u64) -> Result<()> {
-        if bytes > self.remaining {
-            return validation(path, "bundle payloads exceed uncompressed size limit");
-        }
-        Ok(())
-    }
-
-    pub fn consume(&mut self, path: &Path, bytes: u64) -> Result<()> {
-        self.ensure_can_read(path, bytes)?;
-        self.remaining -= bytes;
-        Ok(())
-    }
-}
 
 #[derive(Debug, Error)]
 pub enum ThorError {
@@ -211,6 +185,7 @@ pub struct SourcePack {
     pub manifest: PackageManifest,
     pub manifest_path: PathBuf,
     pub agents: Vec<AgentDefinition>,
+    definition_bundles: DefinitionBundles,
 }
 
 #[derive(Debug, Clone)]
@@ -272,14 +247,18 @@ pub struct SkillDefinition {
     pub frontmatter: SkillFrontmatter,
     pub instructions: String,
     pub source_path: PathBuf,
+    source: String,
+    instructions_offset: usize,
 }
+
+type DefinitionBundles = BTreeMap<String, String>;
 
 impl SourcePack {
     pub fn load(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref();
         let manifest_path = root.join("thor.yaml");
         let manifest = parse_package_file(&manifest_path)?;
-        validate_definition_sources(root)?;
+        let definition_bundles = load_definition_sources(root)?;
         let agents_dir = root.join("agents");
         ensure_real_directory(&agents_dir, "agents directory")?;
         let entries = fs::read_dir(&agents_dir).map_err(|source| ThorError::Read {
@@ -304,7 +283,7 @@ impl SourcePack {
                 return validation(entry.path(), "agents/ may contain only Markdown files");
             }
             let mut agent = parse_agent_file(entry.path())?;
-            expand_agent_instructions(root, &mut agent)?;
+            expand_agent_instructions(&definition_bundles, &mut agent)?;
             agents.push(agent);
         }
         if agents.is_empty() {
@@ -317,6 +296,7 @@ impl SourcePack {
             manifest,
             manifest_path,
             agents,
+            definition_bundles,
         })
     }
 
@@ -351,6 +331,10 @@ impl SourcePack {
             model: mapping.model.clone(),
             effort: mapping.effort.as_str().to_owned(),
         })
+    }
+
+    pub fn definition_bundles(&self) -> &BTreeMap<String, String> {
+        &self.definition_bundles
     }
 }
 
@@ -402,14 +386,25 @@ pub fn parse_agent_file(path: impl AsRef<Path>) -> Result<AgentDefinition> {
     })
 }
 
-fn expand_agent_instructions(root: &Path, agent: &mut AgentDefinition) -> Result<()> {
-    let definition_bundles =
-        load_definition_bundles(root, &agent.source_path, &agent.frontmatter.definitions)?;
+fn expand_agent_instructions(
+    definitions: &DefinitionBundles,
+    agent: &mut AgentDefinition,
+) -> Result<()> {
+    let definition_bundles = load_definition_bundles(
+        definitions,
+        &agent.source_path,
+        &agent.frontmatter.definitions,
+    )?;
     let (instructions, instruction_origin, instruction_owner) = if let Some(template_id) =
         agent.frontmatter.template.as_deref()
     {
         validate_identifier(&agent.source_path, "agent template", template_id)?;
 
+        let root = agent
+            .source_path
+            .parent()
+            .and_then(Path::parent)
+            .expect("agent definitions always have an assets/agents parent");
         let templates_dir = root.join("templates");
         ensure_real_directory(&templates_dir, "templates directory")?;
         let template_path = templates_dir.join(format!("{template_id}.md"));
@@ -488,7 +483,7 @@ fn expand_agent_instructions(root: &Path, agent: &mut AgentDefinition) -> Result
 }
 
 fn load_definition_bundles(
-    root: &Path,
+    definitions: &DefinitionBundles,
     source_path: &Path,
     definition_ids: &[String],
 ) -> Result<String> {
@@ -496,8 +491,6 @@ fn load_definition_bundles(
         return Ok(String::new());
     }
 
-    let definitions_dir = root.join("definitions");
-    ensure_real_directory(&definitions_dir, "definitions directory")?;
     let mut seen = BTreeSet::new();
     let mut bundles = Vec::new();
     for definition_id in definition_ids {
@@ -508,29 +501,22 @@ fn load_definition_bundles(
                 format!("duplicate definition bundle {definition_id}"),
             );
         }
-        let definition_path = definitions_dir.join(format!("{definition_id}.md"));
-        if matches!(
-            fs::symlink_metadata(&definition_path),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound
-        ) {
-            return validation(
-                &definition_path,
-                format!("definition bundle {definition_id} does not exist"),
-            );
-        }
-        ensure_regular_source_file(&definition_path, "definition bundle")?;
-        let definition = read_utf8(&definition_path)?;
-        validate_definition_content(&definition_path, &definition)?;
+        let definition = definitions
+            .get(definition_id)
+            .ok_or_else(|| ThorError::Validation {
+                path: source_path.to_path_buf(),
+                message: format!("definition bundle {definition_id} does not exist"),
+            })?;
         bundles.push(definition.trim().to_owned());
     }
     Ok(bundles.join("\n\n"))
 }
 
-fn validate_definition_sources(root: &Path) -> Result<()> {
+fn load_definition_sources(root: &Path) -> Result<DefinitionBundles> {
     let definitions_dir = root.join("definitions");
     match fs::symlink_metadata(&definitions_dir) {
         Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
         Err(source) => {
             return Err(ThorError::Read {
                 path: definitions_dir.clone(),
@@ -544,6 +530,7 @@ fn validate_definition_sources(root: &Path) -> Result<()> {
         source,
     })?;
     let mut names = BTreeMap::new();
+    let mut definitions = BTreeMap::new();
     for entry in entries {
         let entry = entry.map_err(|source| ThorError::Read {
             path: definitions_dir.clone(),
@@ -581,19 +568,22 @@ fn validate_definition_sources(root: &Path) -> Result<()> {
         ensure_regular_source_file(&path, "definition bundle")?;
         let definition = read_utf8(&path)?;
         validate_definition_content(&path, &definition)?;
+        definitions.insert(definition_id.to_owned(), definition);
     }
-    Ok(())
+    Ok(definitions)
 }
 
 fn validate_definition_content(path: &Path, definition: &str) -> Result<()> {
     if definition.trim().is_empty() {
         return validation(path, "definition bundle must not be empty");
     }
-    if definition.contains(DEFINITION_BUNDLES_SLOT) || definition.contains("<!-- thor:definitions")
+    if definition.contains(DEFINITION_BUNDLES_SLOT)
+        || definition.contains(AGENT_INSTRUCTIONS_SLOT)
+        || definition.contains("<!-- thor:definitions")
     {
         return validation(
             path,
-            "definition bundles may not include definition bundles",
+            "definition bundles may not include Thor markers or definition directives",
         );
     }
     Ok(())
@@ -665,10 +655,13 @@ pub fn parse_skill_file(path: impl AsRef<Path>) -> Result<SkillDefinition> {
     if instructions.trim().is_empty() {
         return validation(path, "skill instructions must not be empty");
     }
+    let instructions_offset = text.len() - instructions.len();
     Ok(SkillDefinition {
         frontmatter,
         instructions: instructions.to_owned(),
         source_path: path.to_path_buf(),
+        source: text,
+        instructions_offset,
     })
 }
 
@@ -677,19 +670,30 @@ pub fn parse_skill_file(path: impl AsRef<Path>) -> Result<SkillDefinition> {
 pub fn preprocess_skill_file(root: impl AsRef<Path>, path: impl AsRef<Path>) -> Result<Vec<u8>> {
     let root = root.as_ref();
     let path = path.as_ref();
-    parse_skill_file(path)?;
-    let source = read_utf8(path)?;
-    let (_, instructions) = split_frontmatter(path, &source)?;
-    let instructions_offset = source.len() - instructions.len();
-    let (definition_ids, instructions) = extract_skill_definition_directive(path, instructions)?;
-    let definition_bundles = load_definition_bundles(root, path, &definition_ids)?;
+    let definitions = load_definition_sources(root)?;
+    let skill = parse_skill_file(path)?;
+    preprocess_skill_definition(&skill, &definitions)
+}
+
+fn preprocess_skill_definition(
+    skill: &SkillDefinition,
+    definitions: &DefinitionBundles,
+) -> Result<Vec<u8>> {
+    let (definition_ids, instructions) =
+        extract_skill_definition_directive(&skill.source_path, &skill.instructions)?;
+    let definition_bundles =
+        load_definition_bundles(definitions, &skill.source_path, &definition_ids)?;
     let instructions = expand_definition_bundles(
-        path,
+        &skill.source_path,
         &instructions,
         &definition_bundles,
         "skill instructions",
     )?;
-    Ok(format!("{}{instructions}", &source[..instructions_offset]).into_bytes())
+    Ok(format!(
+        "{}{instructions}",
+        &skill.source[..skill.instructions_offset]
+    )
+    .into_bytes())
 }
 
 fn extract_skill_definition_directive(
@@ -740,16 +744,16 @@ pub fn collect_skill_payloads(skills_root: impl AsRef<Path>) -> Result<BTreeMap<
     collect_skill_payloads_inner(skills_root.as_ref(), None)
 }
 
-pub fn collect_skill_payloads_with_budget(
+pub fn collect_skill_payloads_with_definitions(
     skills_root: impl AsRef<Path>,
-    budget: &mut PayloadByteBudget,
+    definitions: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, Vec<u8>>> {
-    collect_skill_payloads_inner(skills_root.as_ref(), Some(budget))
+    collect_skill_payloads_inner(skills_root.as_ref(), Some(definitions))
 }
 
 fn collect_skill_payloads_inner(
     skills_root: &Path,
-    mut budget: Option<&mut PayloadByteBudget>,
+    definitions: Option<&BTreeMap<String, String>>,
 ) -> Result<BTreeMap<String, Vec<u8>>> {
     if !skills_root.exists() {
         return Ok(BTreeMap::new());
@@ -765,6 +769,13 @@ fn collect_skill_payloads_inner(
         path: skills_root.to_path_buf(),
         message: "skills directory must have a source root".to_owned(),
     })?;
+    let loaded_definitions;
+    let definitions = if let Some(definitions) = definitions {
+        definitions
+    } else {
+        loaded_definitions = load_definition_sources(source_root)?;
+        &loaded_definitions
+    };
 
     let mut payloads = BTreeMap::new();
     let mut portable_payload_paths = BTreeMap::new();
@@ -795,9 +806,6 @@ fn collect_skill_payloads_inner(
 
         let skill_file = skill_dir.join("SKILL.md");
         ensure_regular_source_file(&skill_file, "skill definition")?;
-        if let Some(budget) = budget.as_deref_mut() {
-            budget.ensure_can_read(&skill_file, source_file_size(&skill_file)?)?;
-        }
         let skill = parse_skill_file(&skill_file)?;
         if skill.frontmatter.name != skill_id {
             return validation(
@@ -837,19 +845,13 @@ fn collect_skill_payloads_inner(
                     },
                 )?;
                 let bytes = if walked.path() == skill_file {
-                    preprocess_skill_file(source_root, walked.path())?
+                    preprocess_skill_definition(&skill, definitions)?
                 } else {
-                    if let Some(budget) = budget.as_deref_mut() {
-                        budget.ensure_can_read(walked.path(), source_file_size(walked.path())?)?;
-                    }
                     fs::read(walked.path()).map_err(|source| ThorError::Read {
                         path: walked.path().to_path_buf(),
                         source,
                     })?
                 };
-                if let Some(budget) = budget.as_deref_mut() {
-                    budget.consume(walked.path(), bytes.len() as u64)?;
-                }
                 if payloads.insert(archive_path.clone(), bytes).is_some() {
                     return validation(
                         walked.path(),
@@ -868,21 +870,12 @@ pub fn collect_static_payloads(
     static_root: impl AsRef<Path>,
     target: Harness,
 ) -> Result<BTreeMap<String, Vec<u8>>> {
-    collect_static_payloads_inner(static_root.as_ref(), target, None)
-}
-
-pub fn collect_static_payloads_with_budget(
-    static_root: impl AsRef<Path>,
-    target: Harness,
-    budget: &mut PayloadByteBudget,
-) -> Result<BTreeMap<String, Vec<u8>>> {
-    collect_static_payloads_inner(static_root.as_ref(), target, Some(budget))
+    collect_static_payloads_inner(static_root.as_ref(), target)
 }
 
 fn collect_static_payloads_inner(
     static_root: &Path,
     target: Harness,
-    mut budget: Option<&mut PayloadByteBudget>,
 ) -> Result<BTreeMap<String, Vec<u8>>> {
     if !static_root.exists() {
         return Ok(BTreeMap::new());
@@ -938,16 +931,10 @@ fn collect_static_payloads_inner(
                     message,
                 },
             )?;
-            if let Some(budget) = budget.as_deref_mut() {
-                budget.ensure_can_read(walked.path(), source_file_size(walked.path())?)?;
-            }
             let bytes = fs::read(walked.path()).map_err(|source| ThorError::Read {
                 path: walked.path().to_path_buf(),
                 source,
             })?;
-            if let Some(budget) = budget.as_deref_mut() {
-                budget.consume(walked.path(), bytes.len() as u64)?;
-            }
             if payloads.insert(archive_path.clone(), bytes).is_some() {
                 return validation(
                     walked.path(),
@@ -957,15 +944,6 @@ fn collect_static_payloads_inner(
         }
     }
     Ok(payloads)
-}
-
-fn source_file_size(path: &Path) -> Result<u64> {
-    fs::metadata(path)
-        .map(|metadata| metadata.len())
-        .map_err(|source| ThorError::Read {
-            path: path.to_path_buf(),
-            source,
-        })
 }
 
 pub fn render_claude(agent: &ResolvedAgent) -> String {
@@ -1735,6 +1713,20 @@ Review the requested change and report actionable findings only.
         )
         .unwrap();
         let error = SourcePack::load(nested_marker.path()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("definition bundles may not include")
+        );
+
+        let agent_marker = fixture_pack();
+        fs::create_dir(agent_marker.path().join("definitions")).unwrap();
+        fs::write(
+            agent_marker.path().join("definitions/known.md"),
+            "{{agent_instructions}}\n",
+        )
+        .unwrap();
+        let error = SourcePack::load(agent_marker.path()).unwrap_err();
         assert!(
             error
                 .to_string()
