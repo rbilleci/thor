@@ -215,7 +215,7 @@ Agent-specific skill preloading is excluded from the v1 contract. Claude can pre
 | Expanded `instructions` and definition bundles | Markdown after YAML frontmatter | `developer_instructions` multiline TOML string |
 | Model reference | Resolve `spec.models.<model-id>.targets.claude.model` into `model` and `.effort` into YAML `effort` | Resolve `spec.models.<model-id>.targets.codex.model` into `model` and `.effort` into `model_reasoning_effort` |
 | `requestedAccess: inherit` | Omit tools and permission mode; parent configuration applies | Omit `sandbox_mode`; parent configuration applies |
-| `requestedAccess: read-only` | Request `permissionMode: plan` and emit the fixed allowlist `Read, Grep, Glob` | Request `sandbox_mode = "read-only"` |
+| `requestedAccess: read-only` | Request `permissionMode: plan` and emit the fixed allowlist `Read, Grep, Glob, Bash` | Request `sandbox_mode = "read-only"` |
 | `requestedAccess: workspace-write` | Request `permissionMode: default`; do not emit a tool allowlist | Request `sandbox_mode = "workspace-write"` |
 | `targets.claude` | Emit only validated `maxTurns`, `background`, and optional `isolation: worktree` | N/A |
 | `targets.codex` | Rejected in v1 by design; a future typed adapter may add it | N/A |
@@ -236,7 +236,7 @@ description: Reviews a pull request for correctness, security, and test gaps.
 model: haiku
 effort: xhigh
 permissionMode: plan
-tools: Read, Grep, Glob
+tools: Read, Grep, Glob, Bash
 maxTurns: 20
 background: false
 ---

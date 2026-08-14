@@ -957,7 +957,7 @@ pub fn render_claude(agent: &ResolvedAgent) -> String {
         RequestedAccess::Inherit => {}
         RequestedAccess::ReadOnly => {
             frontmatter.push("permissionMode: plan".to_owned());
-            frontmatter.push("tools: Read, Grep, Glob".to_owned());
+            frontmatter.push("tools: Read, Grep, Glob, Bash".to_owned());
         }
         RequestedAccess::WorkspaceWrite => frontmatter.push("permissionMode: default".to_owned()),
     }
@@ -1389,7 +1389,7 @@ Review the requested change and report actionable findings only.
         let agent = &pack.agents[0];
         let claude = render_claude(&pack.resolve(agent, Harness::Claude).unwrap());
         assert!(claude.contains("permissionMode: plan"));
-        assert!(claude.contains("tools: Read, Grep, Glob"));
+        assert!(claude.contains("tools: Read, Grep, Glob, Bash"));
         assert!(claude.contains("maxTurns: 20"));
 
         let codex = render_codex(&pack.resolve(agent, Harness::Codex).unwrap()).unwrap();

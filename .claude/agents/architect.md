@@ -4,7 +4,7 @@ description: "Read-only pre-implementation architect for system models, boundari
 model: "opus"
 effort: "xhigh"
 permissionMode: plan
-tools: Read, Grep, Glob
+tools: Read, Grep, Glob, Bash
 ---
 
 # Design Before Implementation
