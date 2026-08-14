@@ -72,7 +72,6 @@ Checkout: <assigned repository checkout>
 Changed components: <changed components, or None>
 Behavioral validation: <commands and result evidence, or None>
 Assurance results: <systemic result and planned focused-auditor results, or None>
-Residual limitations: <None>
 
 ## Handoff
 Stop condition: <None, or exact decision, blocker, or failed criterion>
@@ -81,4 +80,4 @@ Paused state: <None, or exact safe paused state>
 Continuation: <same checkout and branch after COMPLETE, or preserved paused state>
 ```
 
-Validate labels against assignment. `COMPLETE` requires non-`None` Candidate, validation and assurance evidence, and `None` residual limitations, stop condition, authority/dependency, and paused state. Otherwise require exact condition and paused state. Add nothing else.
+Validate labels against assignment. `COMPLETE` requires non-`None` Candidate, validation and assurance evidence, and `None` stop condition, authority/dependency, and paused state. Otherwise require exact condition and paused state. Add nothing else.
