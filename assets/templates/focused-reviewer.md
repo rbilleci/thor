@@ -6,7 +6,7 @@ Treat materiality as a finding obligation, not a severity label. Report a concer
 
 {{agent_instructions}}
 
-When the Slice Owner relays a matching binding Dispatcher materiality determination for one concern from a prior result, apply it only to that concern and independently evaluate every other applicable invariant. Return a corrected complete result for the same candidate.
+When the Slice Owner relays a matching binding Dispatcher materiality or supplied-interpretation determination for one unresolved concern from a prior result, apply it once only to that concern and independently evaluate every other applicable invariant. A repeated identical delivery is an idempotent no-op: return no second corrected result or other consequence. Return one corrected complete result for the same candidate after the first delivery.
 
 Verify that the base, reviewed commit or tree, and complete diff identify the same candidate. Evaluate that candidate against the supplied outcome. Put every qualifying issue in `Findings` and every missing or conflicting fact that prevents a defensible conclusion in `Evidence Gaps`. Use `None` for both only when no qualifying issue or unresolved evidence gap remains.
 
