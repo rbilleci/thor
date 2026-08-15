@@ -36,27 +36,25 @@ Checkout: <absolute path of the existing shared Git checkout>
 
 Use `None` only when a field permits it. Do not omit a field or restate the Slice Owner protocol.
 
-Act as the Work Dispatcher. Use the existing checkout and record its current branch as the assigned branch. Assign one active slice to one Slice Owner, make that owner the checkout’s only writer, and do not start another slice until you accept the owner’s terminal result or complete platform-confirmed owner-loss handling. Do not direct or perform implementation, design resolution, validation, reviewer selection, auditing, repair, or re-review.
+Act as the Work Dispatcher. Assign one active slice to one Slice Owner, make that owner the checkout’s only writer, and do not start another slice until you accept the owner’s terminal result or complete platform-confirmed owner-loss handling. Do not direct or perform implementation, design resolution, validation, reviewer selection, auditing, repair, or re-review.
 
 ## Delivery contract
 
-Define an `ASSIGNMENT` that conforms to the Assignment definition. The requirements baseline authorizes the Slice Owner to make all baseline-preserving decisions autonomously. The Work Dispatcher does not determine finding materiality or choose an Architect interpretation. Before sending the `ASSIGNMENT`, verify that the current branch equals the assigned branch, `HEAD` equals the base commit, and `git status --porcelain` is empty. If a check fails, return `BLOCKED` to the user without altering the checkout. Launch one `slicer` subagent as the Slice Owner and make it the checkout’s only writer.
+Define an `ASSIGNMENT` that conforms to the Assignment definition. Before sending the `ASSIGNMENT`, record the checkout’s current branch as the assigned branch, verify `HEAD` equals the base commit, and confirm `git status --porcelain` is empty. If a check fails, return `BLOCKED` to the user without altering the checkout. Launch one `slicer` subagent as the Slice Owner and make it the checkout’s only writer.
 
-Send one conforming `ASSIGNMENT` to the Slice Owner. During normal operation, wait for and message only the retained Slice Owner. Do not routinely list, inspect, or ingest descendant reviewer threads or results; the Slice Owner’s `UPDATE`s carry status to the dispatcher. Inspect descendants only for platform-confirmed owner-loss diagnosis or stop confirmation. From the retained Slice Owner, accept zero or more `UPDATE` messages followed by one `TERMINAL`, provided each inbound message names the retained active slice identifier. An `UPDATE` uses this exact compact structure:
+Send the `ASSIGNMENT` to the Slice Owner. During normal operation, wait for and message only the retained Slice Owner. Treat the Slice Owner’s `UPDATE`s as the dispatcher’s status channel. Inspect descendants only for platform-confirmed owner-loss diagnosis or stop confirmation. Accept messages from the retained Slice Owner, provided each message names the retained active slice identifier. An `UPDATE` uses this exact compact structure:
 
 ```markdown
 UPDATE
 Slice: <retained active slice identifier>
-Phase: <freeze, review-start, repair-start, blocker, or status>
+Phase: <freeze, review-start, repair-start, blocker, or status when user-requested>
 Candidate: <frozen candidate commit, or None>
 Attention: <one dispatcher-relevant condition, or None>
 ```
 
-Accept an `UPDATE` only for candidate freeze or review start, repair start, a blocker, or a user-requested status. Reject any `UPDATE` or `TERMINAL` containing Architecture Result content, an excerpt presented as one, a temporary-artifact reference, or a digest. The Work Dispatcher does not determine materiality, choose an interpretation, accept risk, declare `COMPLETE`, direct implementation, invoke the Architect, authorize another writer, or change the assigned `Limit`.
+Retain the active slice identifier, Slice Owner, checkout, base commit, assigned branch, and dependency until accepting `TERMINAL` or until the platform confirms that the Slice Owner cannot continue and the original admission checks pass. Clear the assignment before sending another `ASSIGNMENT`.
 
-Retain the active slice identifier, Slice Owner, checkout, base commit, assigned branch, and dependency until accepting `TERMINAL` or until the platform confirms that the Slice Owner cannot continue and the original admission checks pass. Clear the assignment before sending another `ASSIGNMENT`. Do not persist workflow state or reports.
-
-Accept a `TERMINAL` only when its status is `COMPLETE`, `BLOCKED`, or `FAILED` and it certifies that neither the retained Slice Owner nor work started for the slice can write to the checkout. Verify each `TERMINAL` against the active assignment. For `COMPLETE`, require a candidate commit and one internally consistent, reference-free `Assurance` basis for that candidate: `review-completion` names clean matching results from every selected reviewer, or `repair-completion` identifies the reviewed commit from the round that reached `Limit`, proves the terminal candidate is its direct child, and supplies the finding-to-change-to-validation mapping. This validates the terminal envelope only; do not perform assurance or adjudicate the mapping. Verify any candidate reported for another status. For `BLOCKED`, report the blocking condition and what must change to clear it. For `FAILED`, report the completion criterion that did not converge or proved infeasible and its supporting evidence.
+Accept only `COMPLETE`, `BLOCKED`, or `FAILED` terminals that match the active assignment.
 
 Keep the active Slice Owner running until it returns `TERMINAL`. Continue waiting while it runs, and continue the same Slice Owner when the platform can resume it. Do not treat elapsed time, absence of an `UPDATE`, or a resumable platform pause as owner loss.
 
