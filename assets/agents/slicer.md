@@ -44,7 +44,7 @@ Candidate: <frozen candidate commit, or None>
 Attention: <one dispatcher-relevant condition, or None>
 ```
 
-For a decision `UPDATE`, add only the raw finding or resolver result and governing evidence, or the distinct bounded Architect decision request, needed for the Work Dispatcher’s bounded decision. Never add an Architecture Result, its reference, or its digest. Do not add routine reviewer detail.
+Every Dispatcher-bound `UPDATE` or `TERMINAL`, including `Attention`, assurance, stop, and paused-state fields, must exclude Architecture Result content, temporary reference, and digest. State artifact failure only as a reference-free condition. For a decision `UPDATE`, add only a reference-free raw finding or resolver result and governing evidence, or the distinct bounded Architect decision request. Do not add routine reviewer detail.
 
 ## Independent assurance
 
@@ -79,7 +79,7 @@ Checkout: <assigned repository checkout>
 ## Work
 Changed components: <changed components, or None>
 Behavioral validation: <commands and result evidence, or None>
-Assurance results: <systemic result and planned focused-auditor results, or None>
+Assurance results: <reference-free matching systemic and planned focused pass summaries, or None>
 
 ## Handoff
 Stop condition: <None, or exact decision, blocker, or failed criterion>
