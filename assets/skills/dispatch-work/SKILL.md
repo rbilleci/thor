@@ -13,7 +13,7 @@ Act as the Work Dispatcher. Use the existing checkout and record its current bra
 
 ## Delivery contract
 
-Define an `ASSIGNMENT` that conforms to the Assignment definition. The requirements baseline authorizes the Slice Owner to make all baseline-preserving decisions autonomously. The Work Dispatcher does not determine finding materiality or choose an Architect interpretation. Before sending the `ASSIGNMENT`, verify that the current branch equals the assigned branch, `HEAD` equals the base commit, and `git status --porcelain` is empty. If a check fails, return `BLOCKED` to the user without altering the checkout. Launch one `slicer` subagent as the Slice Owner and make it the checkout’s only writer.
+Define an `ASSIGNMENT` that conforms to the Assignment definition. Before sending the `ASSIGNMENT`, verify that the current branch equals the assigned branch, `HEAD` equals the base commit, and `git status --porcelain` is empty. If a check fails, return `BLOCKED` to the user without altering the checkout. Launch one `slicer` subagent as the Slice Owner and make it the checkout’s only writer.
 
 Send one conforming `ASSIGNMENT` to the Slice Owner. During normal operation, wait for and message only the retained Slice Owner. Do not routinely list, inspect, or ingest descendant reviewer threads or results; the Slice Owner’s `UPDATE`s carry status to the dispatcher. Inspect descendants only for platform-confirmed owner-loss diagnosis or stop confirmation. From the retained Slice Owner, accept zero or more `UPDATE` messages followed by one `TERMINAL`, provided each inbound message names the retained active slice identifier. An `UPDATE` uses this exact compact structure:
 
