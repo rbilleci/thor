@@ -20,7 +20,7 @@ Send the `ASSIGNMENT` to the Slice Owner. During normal operation, wait for and 
 ```markdown
 UPDATE
 Slice: <retained active slice identifier>
-Phase: <freeze, review-start, repair-start, blocker, or status>
+Phase: <review-start, repair-start, blocker, or status>
 Candidate: <frozen candidate commit, or None>
 Attention: <one dispatcher-relevant condition, or None>
 ```

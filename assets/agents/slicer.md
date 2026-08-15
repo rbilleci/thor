@@ -16,39 +16,39 @@ Deliver the assigned outcome. Preserve unrelated changes and stay in scope.
 
 ## Accept the assignment
 
-Before editing, verify that the `ASSIGNMENT` conforms to the Assignment definition, its branch and base match the checkout, and `git status --porcelain` is empty; otherwise return `BLOCKED`.
+Before editing, verify the `ASSIGNMENT` conforms to the Assignment definition, confirm the current branch equals `Branch`, `HEAD` equals `Base`, and `git status --porcelain` is empty; otherwise return `BLOCKED`.
 
-Before editing, invoke one fresh `architect` subagent with the assignment and relevant repository, implementation, and operational context. Require exactly one `Blueprint: <absolute path>` result. Accept the path only when it identifies a readable regular file outside the checkout, then assume ownership of that file and read the Blueprint from it. Accept only a structurally complete and internally consistent Blueprint whose `Outcome` and `Base` match the assignment and whose `Status` is `BLUEPRINT_READY`, `BLUEPRINT_NOT_REQUIRED`, or `BLUEPRINT_INDETERMINATE`; otherwise delete the file and return `BLOCKED`. `BLUEPRINT_INDETERMINATE` does not authorize changes; delete the file and return `BLOCKED` with its missing or conflicting evidence. Obtain a new Blueprint only when the assignment or a material design assumption changes.
+Before editing, invoke one fresh `architect` subagent with the assignment and relevant repository, implementation, and operational context. Require exactly one `Blueprint: <absolute path>` result. Accept the path only when it identifies a readable regular file outside the checkout, then assume ownership of that file and read the Blueprint from it. Accept only a Blueprint that matches the Architect's required structure, repeats the assignment's `Outcome` and `Base`, and has `Status` `BLUEPRINT_READY`, `BLUEPRINT_NOT_REQUIRED`, or `BLUEPRINT_INDETERMINATE`; otherwise delete the file and return `BLOCKED`. `BLUEPRINT_INDETERMINATE` does not authorize changes; delete the file and return `BLOCKED` with its missing or conflicting evidence. A material change to its assignment, base, governing evidence, or assurance-lens selection invalidates the Blueprint; return `BLOCKED`.
 
-Implement and validate against the accepted Blueprint. The Blueprint constrains but does not certify the implementation; make every baseline-preserving implementation decision that it does not constrain. Retain the accepted Blueprint file for the entire slice, including every review and repair round. Pass reviewers only its path. Delete the file only before returning a terminal result or before requesting a replacement Blueprint. Never send its path or content to the Dispatcher.
+Implement and validate against the accepted Blueprint. The Blueprint constrains but does not certify the implementation; make every baseline-preserving implementation decision that it does not constrain. Retain the Blueprint through every review and repair round. Pass it by path, not content. Delete it during terminal cleanup. Never send its path or content to the Dispatcher.
 
 ## Implement and validate
 
-Implement the smallest complete change and run relevant repository validation. Repair within the requirements baseline. Return `BLOCKED` when a required dependency or validation is unavailable.
+Run every validation required by repository instructions. Repair failures within the assignment. Return `FAILED` if repair is infeasible and `BLOCKED` if a dependency or validation cannot run.
 
 Commit on the assigned branch before assurance. Confirm the commit and clean checkout, then keep the candidate unchanged until its review set completes.
 
-Send an interim `UPDATE` only for freeze, review start, repair start, a blocker, or requested status. Use exactly:
+Send an `UPDATE` when review starts, repair starts, work blocks, or the Dispatcher requests status. Use exactly:
 
 ```markdown
 UPDATE
 Slice: <assigned slice identifier>
-Phase: <freeze, review-start, repair-start, blocker, or status>
+Phase: <review-start, repair-start, blocker, or status>
 Candidate: <frozen candidate commit, or None>
 Attention: <one dispatcher-relevant condition, or None>
 ```
 
 ## Independent assurance
 
-Run exactly the canonical reviewers selected by the Blueprint against the frozen candidate and accepted Blueprint file. Keep the candidate unchanged and wait for a complete result that identifies the candidate from every selected reviewer. `Selection: None` is a clean review set without reviewer calls.
+Run exactly the canonical reviewers selected by the Blueprint against the frozen candidate and accepted Blueprint file. Keep the candidate unchanged and wait until every selected reviewer returns its required result with `Revision` equal to the frozen candidate. `Selection: None` is a clean review set without reviewer calls.
 
-A review set is clean only when every selected reviewer reports no findings or evidence gaps. Return `BLOCKED` for an evidence gap or unavailable selected reviewer. Every complete review set with findings requires repair, including the final review set permitted by the assigned `Limit`. Repair every finding within the requirements baseline, validate and commit the replacement, and map each finding to its change and validation evidence. Return `FAILED` only when a required repair cannot satisfy the requirements baseline. Repeat assurance when the `Limit` permits another review set; when the repaired set reaches the `Limit`, do not start another review set.
+The `Limit` counts rounds when their review sets start. Return `BLOCKED` for an evidence gap or unavailable reviewer. A clean review set completes assurance. Otherwise repair every finding, validate and commit the replacement, and map each finding to its change and validation evidence. Return `FAILED` if a repair cannot satisfy the assignment. Start another round only when the `Limit` permits it.
 
-Return `COMPLETE` only when the terminal candidate is validated, the checkout is clean, and either its review set is clean or it is the validated repair from the final review set permitted by the `Limit`.
+Return `COMPLETE` only when the terminal candidate is validated, the checkout is clean, and either its review set is clean or it contains the validated repairs from the final permitted round.
 
 ## Terminal report
 
-Before returning, delete the Blueprint file and other disposable files created during implementation, and preserve user changes.
+During terminal cleanup, delete the Blueprint and temporary files created by the slice but excluded from the candidate. Return `BLOCKED` if cleanup fails; preserve every other file.
 
 Return only:
 

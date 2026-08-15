@@ -27,7 +27,7 @@ Scope: <included work and affected behavior>
 Exclusion: <excluded work and behavior, or None>
 Constraint: <binding limits, or None>
 Acceptance: <observable pass-or-fail conditions>
-Limit: <positive maximum number of review sets, each including completion of any required repairs>
+Limit: <positive maximum number of review-and-repair rounds>
 Dependency: <required preconditions, people, systems, or access, or None>
 Base: <full object ID of an existing Git commit>
 Branch: <checked-out, non-detached branch name>
@@ -47,7 +47,7 @@ Send the `ASSIGNMENT` to the Slice Owner. During normal operation, wait for and 
 ```markdown
 UPDATE
 Slice: <retained active slice identifier>
-Phase: <freeze, review-start, repair-start, blocker, or status>
+Phase: <review-start, repair-start, blocker, or status>
 Candidate: <frozen candidate commit, or None>
 Attention: <one dispatcher-relevant condition, or None>
 ```
