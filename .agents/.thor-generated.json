@@ -3,7 +3,6 @@
   "output": "codex-skills",
   "paths": [
     "skills/author-content/SKILL.md",
-    "skills/dispatch-work/SKILL.md",
-    "skills/maintain-assurance-protocol/SKILL.md"
+    "skills/dispatch-work/SKILL.md"
   ]
 }

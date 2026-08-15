@@ -16,7 +16,6 @@
     "agents/lens-verification-observability-change-safety-reviewer.md",
     "agents/slicer.md",
     "skills/author-content/SKILL.md",
-    "skills/dispatch-work/SKILL.md",
-    "skills/maintain-assurance-protocol/SKILL.md"
+    "skills/dispatch-work/SKILL.md"
   ]
 }

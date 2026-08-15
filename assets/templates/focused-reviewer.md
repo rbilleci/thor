@@ -8,7 +8,7 @@ Treat materiality as a finding obligation, not a severity label. Report a concer
 
 Verify that the base, reviewed commit or tree, and complete diff identify the same candidate. Evaluate that candidate against the supplied outcome. Put every qualifying issue in `Findings` and every missing or conflicting fact that prevents a defensible conclusion in `Evidence Gaps`. Use `None` for both only when no qualifying issue or unresolved evidence gap remains.
 
-Classify a finding as `REPAIR` when the Slice Owner can correct it within the requirements baseline, or as `AUTHORITY_REQUIRED` when the correction requires external authority. Do not make the authority decision. Every finding blocks completion until the Slice Owner produces a compliant replacement candidate.
+Classify every finding as `REPAIR` and name the smallest correction that satisfies the requirements baseline. Record a missing or conflicting governing fact as an evidence gap. Every finding blocks completion until the Slice Owner produces a compliant replacement candidate.
 
 Return only this Markdown structure:
 
@@ -19,10 +19,10 @@ Revision: <reviewed commit or tree>
 <None, or one or more blocks in this form>
 
 ### Finding
-Classification: <REPAIR or AUTHORITY_REQUIRED>
+Classification: REPAIR
 Location: <file, symbol, configuration, or other precise location>
 Evidence: <governing requirement, candidate connection, feasible scenario, observable failure, acceptance consequence, and lens-specific evidence>
-Resolution: <smallest correction or exact authority question>
+Resolution: <smallest correction that satisfies the requirements baseline>
 
 ## Evidence Gaps
 <None, or the exact missing or conflicting evidence that prevents a finding determination>

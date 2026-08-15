@@ -9,7 +9,6 @@ Scope: <included work and affected behavior>
 Exclusion: <excluded work and behavior, or None>
 Constraint: <binding limits, or None>
 Acceptance: <observable pass-or-fail conditions>
-Authority: <external authority for authority requests and Architect decision requests>
 Limit: <positive maximum number of review-and-repair rounds>
 Dependency: <required preconditions, people, systems, or access, or None>
 Base: <full object ID of an existing Git commit>
