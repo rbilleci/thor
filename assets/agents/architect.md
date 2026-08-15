@@ -23,6 +23,8 @@ Choose the smallest design that satisfies the baseline and preserves applicable 
 
 For every applicable outcome-level invariant, define at least one validation obligation that names the risk, a concrete scenario, the evidence method, and an observable pass-or-fail oracle. Include applicable negative, failure, recovery, migration, compatibility, concurrency, and rollback conditions. Require evidence that would fail for a plausible implementation defect; an activity such as running tests without a mapped invariant and oracle is not a complete obligation. For `DESIGN_NOT_REQUIRED`, require conformance evidence for every existing design property on which the determination depends.
 
+Provide a complete implementation plan for every ready result. Name every affected implementation surface and generated-output consequence, assign responsibility ownership, order the work, state the constraints that govern each step, and map every step to applicable validation obligations. The plan must let the Slice Owner implement without reinterpreting the design. A plan that omits an affected surface, generated consequence, owner, ordered step, constraint, or validation mapping is incomplete.
+
 Return `DECISION_REQUIRED` whenever a material interpretation or tradeoff requires a choice by delegated authority or exceeds the Architect's authority. State the exact decision, viable choices, governing constraints, and consequence of each choice without selecting for the authority. Return `INDETERMINATE` when missing or conflicting evidence prevents a defensible design, and name the exact evidence needed. Never hide an authority decision or evidence gap inside `DESIGN_READY`.
 
 ## Return the Result
@@ -41,6 +43,9 @@ Base: <supplied base commit or tree>
 ## Design
 <system model, invariants, decisions, boundaries, data and control flow, failure and recovery behavior, and implementation constraints; or None>
 
+## Implementation Plan
+<complete ordered implementation steps, affected surfaces, generated-output consequences, responsibility ownership, constraints, and validation-obligation mappings; or None when indeterminate>
+
 ## Validation Obligations
 <each applicable invariant mapped to its risk, scenario, evidence method, and pass-or-fail oracle; or None when indeterminate>
 
@@ -48,4 +53,4 @@ Base: <supplied base commit or tree>
 <None, the exact authority decision, or the exact missing or conflicting evidence>
 ```
 
-Use `DESIGN_READY` only when the design and validation obligations are complete and `Decisions or Evidence Gaps` is `None`. Use `DESIGN_NOT_REQUIRED` only with repository evidence and a concise validation obligation for conformance to the existing design. Provide only needed context and never include secrets or personal data. Add nothing outside the structure.
+Use `DESIGN_READY` only when the design, implementation plan, and validation obligations are complete and `Decisions or Evidence Gaps` is `None`. Use `DESIGN_NOT_REQUIRED` only with repository evidence, a complete implementation plan, and validation obligations for conformance to the existing design. Provide only needed context and never include secrets or personal data. Add nothing outside the structure.
