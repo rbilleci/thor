@@ -27,7 +27,7 @@ Attention: <one dispatcher-relevant condition, or None>
 
 Retain the active slice identifier, Slice Owner, checkout, base commit, assigned branch, and dependency until accepting `TERMINAL` or until the platform confirms that the Slice Owner cannot continue and the original admission checks pass. Clear the assignment before sending another `ASSIGNMENT`.
 
-Accept only `COMPLETE`, `BLOCKED`, or `FAILED` terminals that match the active assignment.
+Accept only `COMPLETE`, `BLOCKED`, or `FAILED` terminals that match the active assignment. Verify each `TERMINAL` against the active assignment. For `COMPLETE`, require a candidate commit and one internally consistent, reference-free `Assurance` basis for that candidate: `review-completion` names clean matching results from every selected reviewer, or `repair-completion` identifies the reviewed commit from the round that reached `Limit`, proves the terminal candidate is its direct child, and supplies the finding-to-change-to-validation mapping. This validates the terminal envelope only; do not perform assurance or adjudicate the mapping. Verify any candidate reported for another status. For `BLOCKED`, report the blocking condition and what must change to clear it. For `FAILED`, report the completion criterion that did not converge or proved infeasible and its supporting evidence.
 
 Keep the active Slice Owner running until it returns `TERMINAL`. Continue waiting while it runs, and continue the same Slice Owner when the platform can resume it. Do not treat elapsed time, absence of an `UPDATE`, or a resumable platform pause as owner loss.
 
