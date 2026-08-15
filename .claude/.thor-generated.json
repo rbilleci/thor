@@ -3,7 +3,6 @@
   "output": "claude",
   "paths": [
     "agents/architect.md",
-    "agents/design-contract-resolver.md",
     "agents/lens-architecture-boundaries-reviewer.md",
     "agents/lens-concurrency-distributed-systems-reviewer.md",
     "agents/lens-data-integrity-lifecycle-reviewer.md",
