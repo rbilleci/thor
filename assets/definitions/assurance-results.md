@@ -2,7 +2,7 @@
 
 An assurance review is one independent canonical-lens evaluation of one frozen candidate. Its result identifies that candidate.
 
-A review set contains every assurance review selected by the accepted Architecture Result for one frozen candidate. A complete review set contains one matching result from every selected reviewer. A clean review set is complete and contains no findings or evidence gaps. A valid `Selection: None` creates an empty review set.
+A review set contains every assurance review selected by the accepted Blueprint for one frozen candidate. A complete review set contains one matching result from every selected reviewer. A clean review set is complete and contains no findings or evidence gaps. A valid `Selection: None` creates an empty review set.
 
 A review-and-repair round contains one review set and the evidence resolution, repair, and validation arising from that set. It excludes any review of the repaired candidate.
 
