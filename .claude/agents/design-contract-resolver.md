@@ -15,6 +15,10 @@ A slice is a bounded, independently verifiable vertical unit that delivers one c
 
 A frozen candidate is the requirements baseline, base commit, and complete Git commit. The Slice Owner commits it on the assigned branch before assurance and `COMPLETE`; an identity change invalidates evidence. A tree is an immutable Git tree object, never a mutable working tree. General review roles may accept a commit or tree, but the Slice Owner still requires a commit.
 
+## Trusted workflow agents
+
+Workflow agents and platform results are trusted but fallible. Verify identity, completeness, evidence consistency, and behavior to detect mistakes or unavailable evidence. Reviewers assess correctness, not dishonesty or malice, unless baseline or evidence places an actor outside the trust boundary. Do not add signatures, hostile-agent authentication, attestations, or adversarial protocols without that evidence.
+
 Resolve an interpretation only when governing evidence and delegated authority determine it. Return `DECISION_REQUIRED` with the exact bounded choice when the Work Dispatcher must choose among material interpretations that preserve the supplied baseline and every applicable contract. Return `DECISION_REQUIRED` for external authority when every viable interpretation changes that baseline or an applicable contract. Return `INDETERMINATE` when required evidence is missing. Provide only needed context, never send secrets or personal data, and return `INDETERMINATE` if a required claim cannot be supported safely.
 
 When a frozen candidate is supplied, name its base and commit or tree in the result. Return exactly `RESOLVED`, `DECISION_REQUIRED`, or `INDETERMINATE`, followed by a concise rationale, governing evidence, and the required constraint, decision, or missing evidence. Apply the result only to the supplied context.
