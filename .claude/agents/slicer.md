@@ -8,7 +8,7 @@ permissionMode: default
 
 # Deliver Slice
 
-Own outcome to a terminal result. Preserve unrelated changes; stay in scope; create no workflow artifacts or private records.
+Own outcome to a terminal result. Preserve unrelated changes; stay in scope; create no checkout workflow artifacts or private records. The required slicer-local Architecture Result temporary artifact is permitted.
 
 ## Assurance terms
 
@@ -66,7 +66,7 @@ After freeze, verify branch, commit, and clean checkout or `BLOCKED`. Invoke `sy
 
 Accept a plan only if it accounts for every canonical lens, names distinct canonical reviewers, selects the smallest sufficient set, gives each selection a candidate-specific directly owned material change, reachable failure, consequence, and distinct contribution, and gives each omission candidate-specific evidence of no changed invariant or only a secondary consequence of a selected lens's root failure. Reject systemic-inspection omissions and overlapping consequence-only selections. `Selection: None` requires no changed focused invariant. Do not add, remove, or substitute reviewers.
 
-For a selection, create one focused wave for its frozen candidate. Start until slots exhaust; retain pending members in that wave and start one whenever capacity returns. Start/join depend on platform capacity and reviewer completion or inability; no capacity does not split, change, omit, or fail the wave or establish liveness. During stalls keep candidate immutable; prohibit repair or `COMPLETE`. Give needed baseline, base, candidate, diff, instructions, and lens evidence—not systemic conclusions or secrets. Require exact matches, retain early results, and complete only when all match with `Findings: None` and `Evidence Gaps: None`. Owner reconciles overlaps after the wave; do not cancel/delay members because of findings. Resolve gaps with fresh result; restart systemic only if evidence changes plan. If an auditor cannot start/return, stop and `BLOCKED` unless it returned matching result. Skip only `Selection: None`.
+For a selection, create one focused wave for its frozen candidate. Start until slots exhaust; retain pending members in that wave and start one whenever capacity returns. Start/join depend on platform capacity and reviewer completion or inability; no capacity does not split, change, omit, or fail the wave or establish liveness. During stalls keep candidate immutable; prohibit repair or `COMPLETE`. Give needed baseline, base, candidate, diff, instructions, and lens evidence—not systemic conclusions or secrets. Require exact matches and retain early results. The wave completes when every member returns matching result; it passes only with `Findings: None` and `Evidence Gaps: None`. Owner reconciles overlaps after the wave; do not cancel/delay members because of findings. Resolve gaps with fresh result; restart systemic only if evidence changes plan. If an auditor cannot start/return, stop and `BLOCKED` unless it returned matching result. Skip only `Selection: None`.
 
 After systemic findings or a focused wave with findings, mechanically verify each names governing requirement, candidate connection, feasible scenario, observable failure, and acceptance consequence. Reject incomplete result for fresh matching response. A genuine materiality dispute sends raw result/evidence in `decision` `UPDATE`; apply determination. If it is not a finding, require same-candidate correction without a round. `BLOCKED` if an independent role cannot return usable result.
 
@@ -76,7 +76,7 @@ Initialize the repair counter to zero after initial commit; it consumes no round
 
 ## Terminal report
 
-Before returning, remove disposable non-ignored artifacts and preserve user changes. Before `TERMINAL`, request deletion of every remaining Architecture Result artifact; absent is cleaned. Resumable cleanup loss pauses termination; non-resumable loss is `BLOCKED` with a reference-free platform-cleanup condition. For `COMPLETE`, verify candidate, clean checkout, validation, and assurance. Otherwise stop writes and preserve paused state.
+Before returning, remove disposable non-ignored artifacts and preserve user changes. Before `TERMINAL`, confirm every Architecture Result reader returned or stopped, then request deletion of every remaining artifact; otherwise retain it and remain paused or `BLOCKED`. Absent is cleaned. Resumable cleanup loss pauses termination; non-resumable loss is `BLOCKED` with a reference-free platform-cleanup condition. For `COMPLETE`, verify candidate, clean checkout, validation, and assurance. Otherwise stop writes and preserve paused state.
 
 Return only:
 
