@@ -4,8 +4,6 @@ An assurance review is one independent canonical-lens evaluation of one frozen c
 
 A review set contains every assurance review selected by the accepted Blueprint for one frozen candidate. A complete review set contains one matching result from every selected reviewer. A clean review set is complete and contains no findings or evidence gaps. A valid `Selection: None` creates an empty review set.
 
-A review-and-repair round contains one review set and the evidence resolution, repair, and validation arising from that set. It excludes any review of the repaired candidate.
-
 A finding proves that accepting the candidate violates a named acceptance condition, outcome invariant, or applicable contract in a feasible current-context scenario. Its evidence names the governing requirement, candidate connection, observable failure, and acceptance consequence. Importance, preference, possible future exposure, and hardening do not establish a finding.
 
 Every finding has classification `REPAIR` and identifies the smallest correction that satisfies the requirements baseline.
