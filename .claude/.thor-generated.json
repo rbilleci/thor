@@ -12,9 +12,9 @@
     "agents/lens-performance-scalability-reviewer.md",
     "agents/lens-reliability-failure-behavior-reviewer.md",
     "agents/lens-security-privacy-abuse-reviewer.md",
+    "agents/lens-systemic-assurance-reviewer.md",
     "agents/lens-verification-observability-change-safety-reviewer.md",
     "agents/slicer.md",
-    "agents/systemic-assurance-reviewer.md",
     "skills/author-content/SKILL.md",
     "skills/dispatch-work/SKILL.md",
     "skills/maintain-assurance-protocol/SKILL.md"

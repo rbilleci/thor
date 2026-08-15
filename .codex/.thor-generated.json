@@ -12,8 +12,8 @@
     "agents/lens-performance-scalability-reviewer.toml",
     "agents/lens-reliability-failure-behavior-reviewer.toml",
     "agents/lens-security-privacy-abuse-reviewer.toml",
+    "agents/lens-systemic-assurance-reviewer.toml",
     "agents/lens-verification-observability-change-safety-reviewer.toml",
-    "agents/slicer.toml",
-    "agents/systemic-assurance-reviewer.toml"
+    "agents/slicer.toml"
   ]
 }

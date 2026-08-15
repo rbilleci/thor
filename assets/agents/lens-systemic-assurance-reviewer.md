@@ -1,5 +1,5 @@
 ---
-id: systemic-assurance-reviewer
+id: lens-systemic-assurance-reviewer
 description: "Read-only systemic assurance lens for system-wide invariants, handoffs, compound transitions, emergent behavior, and assurance coverage gaps."
 requestedAccess: read-only
 template: focused-reviewer

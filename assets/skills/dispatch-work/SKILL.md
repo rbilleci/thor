@@ -5,17 +5,17 @@ description: Use only in the main conversation when the user asks to handle a mu
 
 # Dispatch Work
 
-<!-- thor:definitions: slice-identity -->
+<!-- thor:definitions: slice-identity, assignment -->
 
 {{definition_bundles}}
 
-Act as the Work Dispatcher. Use the existing checkout. Set the assigned branch to its current branch. Assign one active slice to one Slice Owner, wait for its terminal result or complete confirmed owner-loss handling, and only then start another slice. Outside the bounded decision authority below, do not coordinate implementation, design resolution, validation, selection, auditing, repair, or re-review.
+Act as the Work Dispatcher. Use the existing checkout and record its current branch as the assigned branch. Assign one active slice to one Slice Owner, make that owner the checkout’s only writer, and do not start another slice until you accept the owner’s terminal result or complete platform-confirmed owner-loss handling. Except for the explicitly defined decision authority, do not direct or perform implementation, design resolution, validation, reviewer selection, auditing, repair, or re-review.
 
 ## Delivery contract
 
-Define a compact, task-specific `ASSIGNMENT` containing the complete requirements baseline—an independently verifiable outcome, scope, non-goals, constraints, and acceptance criteria—plus decision authority, dependencies, base commit, assigned branch, checkout, and a new slice identifier. Do not copy or paraphrase the general Slice Owner protocol in the assignment; `assets/agents/slicer.md` governs that protocol. Assign the Work Dispatcher authority to determine an escalated finding's materiality and choose only among Architect-supplied interpretations when the decision preserves that baseline and every applicable contract. Reserve changes to the baseline or an applicable contract for external authority. Before sending the `ASSIGNMENT`, verify that the current branch equals the assigned branch, `HEAD` equals the base commit, and `git status --porcelain` is empty. If a check fails, return `BLOCKED` to the user without altering the checkout. Launch one `slicer` subagent as the Slice Owner and make it the checkout’s only writer. Do not create another Git worktree or branch.
+Define an `ASSIGNMENT` that conforms to the Assignment definition. Assign the Work Dispatcher authority to determine an escalated finding's materiality and choose only among Architect-supplied interpretations when the decision preserves that baseline and every applicable contract. Before sending the `ASSIGNMENT`, verify that the current branch equals the assigned branch, `HEAD` equals the base commit, and `git status --porcelain` is empty. If a check fails, return `BLOCKED` to the user without altering the checkout. Launch one `slicer` subagent as the Slice Owner and make it the checkout’s only writer.
 
-Send one `ASSIGNMENT` that names the new slice identifier to the Slice Owner. During normal operation, wait for and message only the retained Slice Owner. Do not routinely list, inspect, or ingest descendant reviewer threads or results; the Slice Owner’s `UPDATE`s carry status to the dispatcher. Inspect descendants only for platform-confirmed owner-loss diagnosis or stop confirmation. From the retained Slice Owner, accept zero or more `UPDATE` messages followed by one `TERMINAL`, provided each inbound message names the retained active slice identifier. An `UPDATE` uses this exact compact structure:
+Send one conforming `ASSIGNMENT` to the Slice Owner. During normal operation, wait for and message only the retained Slice Owner. Do not routinely list, inspect, or ingest descendant reviewer threads or results; the Slice Owner’s `UPDATE`s carry status to the dispatcher. Inspect descendants only for platform-confirmed owner-loss diagnosis or stop confirmation. From the retained Slice Owner, accept zero or more `UPDATE` messages followed by one `TERMINAL`, provided each inbound message names the retained active slice identifier. An `UPDATE` uses this exact compact structure:
 
 ```markdown
 UPDATE
