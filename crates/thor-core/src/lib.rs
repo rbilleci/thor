@@ -1394,6 +1394,25 @@ Review the requested change and report actionable findings only.
                 .contains("schema validation failed")
         );
 
+        for (target, replacement) in [("claude", "model: \" \""), ("codex", "model: \" \"")] {
+            let whitespace_model = fixture_pack();
+            fs::write(
+                whitespace_model.path().join("agents/pr-reviewer.md"),
+                match target {
+                    "claude" => AGENT.replace("model: opus", replacement),
+                    "codex" => AGENT.replace("model: gpt-5.6", replacement),
+                    _ => unreachable!(),
+                },
+            )
+            .unwrap();
+            assert!(
+                SourcePack::load(whitespace_model.path())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("schema validation failed")
+            );
+        }
+
         let inconsistent = fixture_pack();
         fs::write(
             inconsistent.path().join("agents/second-reviewer.md"),
@@ -1889,6 +1908,24 @@ Review the requested change and report actionable findings only.
                 .validate(&serde_json::to_value(invalid).unwrap())
                 .is_err()
         );
+
+        for model in ["opus", "gpt-5.6"] {
+            let invalid: serde_yaml::Value = serde_yaml::from_str(
+                AGENT
+                    .replace(&format!("model: {model}"), "model: \" \"")
+                    .strip_prefix("---\n")
+                    .unwrap()
+                    .split_once("\n---\n")
+                    .unwrap()
+                    .0,
+            )
+            .unwrap();
+            assert!(
+                validator
+                    .validate(&serde_json::to_value(invalid).unwrap())
+                    .is_err()
+            );
+        }
     }
 
     #[test]
