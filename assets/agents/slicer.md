@@ -28,7 +28,17 @@ Implement the smallest complete change. Run fast then behavioral and repository 
 
 Commit candidate on assigned branch before assurance. Identity includes baseline, base, branch, frozen commit, source, tests, configuration/schema Git tree, and applicable deployment, migration, rollback, and recovery plan; changes invalidate results. Pause writes through the complete review wave; recheck branch, reviewed commit, and clean checkout before accepting a result. Discard mismatches. Before `COMPLETE`, verify the reviewed candidate and clean checkout.
 
-Send `UPDATE`s only for freeze/review start, repair start, blocker/decision, or requested status; include slice id.
+Send an `UPDATE` only for freeze or review start, repair start, a blocker or decision, or requested status. Use this exact compact structure:
+
+```markdown
+UPDATE
+Slice: <assigned slice identifier>
+Phase: <freeze, review-start, repair-start, blocker, decision, or status>
+Candidate: <frozen candidate commit, or None>
+Attention: <one dispatcher-relevant condition, or None>
+```
+
+For a decision `UPDATE`, add only the raw finding or resolver result and the governing evidence needed for the Work Dispatcher’s bounded decision. Do not add routine reviewer detail.
 
 ## Independent assurance
 
