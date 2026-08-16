@@ -1,0 +1,10 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# IntelliJ IDEA / RustRover
+/.idea/
+*.iml
+
+# Thor local lifecycle state and transaction staging
+/.thor/

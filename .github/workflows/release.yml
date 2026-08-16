@@ -1,0 +1,113 @@
+name: Release Thor CLI
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing immutable vX.Y.Z tag to publish
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            asset: thor-linux-amd64
+            binary: thor
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            asset: thor-linux-arm64
+            binary: thor
+          - runner: macos-13
+            target: x86_64-apple-darwin
+            asset: thor-darwin-amd64
+            binary: thor
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            asset: thor-darwin-arm64
+            binary: thor
+          - runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            asset: thor-windows-amd64.exe
+            binary: thor.exe
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.tag }}
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: |
+          if [ "${{ matrix.target }}" = x86_64-unknown-linux-musl ]; then sudo apt-get update && sudo apt-get install -y musl-tools; fi
+          rustup toolchain install 1.97.1 --profile minimal --target ${{ matrix.target }}
+      - name: Test Windows bootstrap before releasing
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: Invoke-Pester -Path scripts/install.Tests.ps1 -CI -Output Detailed
+      - name: Build native CLI
+        shell: bash
+        run: |
+          cargo +1.97.1 build --release --locked -p thor --target ${{ matrix.target }}
+          mkdir release-asset
+          cp target/${{ matrix.target }}/release/${{ matrix.binary }} release-asset/${{ matrix.asset }}
+          if [ "${{ matrix.target }}" = x86_64-unknown-linux-musl ]; then
+            cargo +1.97.1 build --release --locked -p thor-build --target ${{ matrix.target }}
+            cp target/${{ matrix.target }}/release/thor-build release-asset/thor-build-linux-amd64
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ matrix.asset }}
+          path: release-asset/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal --component clippy,rustfmt
+      - name: Verify the tagged release candidate before signing
+        run: |
+          cargo +1.97.1 fmt --all -- --check
+          cargo +1.97.1 clippy --workspace --all-targets -- -D warnings
+          cargo +1.97.1 test --workspace
+          sh scripts/test-install.sh
+      - name: Assemble checksums, bootstrap assets, and signed inventory
+        env:
+          THOR_RELEASE_SIGNING_KEY: ${{ secrets.THOR_RELEASE_SIGNING_KEY }}
+        run: |
+          test -n "$THOR_RELEASE_SIGNING_KEY"
+          printf '%s' "$RELEASE_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'
+          test "$RELEASE_TAG" = "v$(cargo +1.97.1 run --quiet --locked -p thor -- --version | awk '{ print $2 }')"
+          test -f release-assets/thor-build-linux-amd64
+          trap 'rm -f release-signing-key.txt' EXIT
+          cp scripts/install.sh scripts/install.ps1 release-assets/
+          chmod 755 release-assets/install.sh
+          sha256sum release-assets/thor-* > release-assets/SHA256SUMS
+          printf '%s' "$THOR_RELEASE_SIGNING_KEY" > release-signing-key.txt
+          cargo +1.97.1 run --locked --release -p thor-build -- release-manifest \
+            --assets-dir release-assets \
+            --out release-assets/thor-release-manifest.json \
+            --signing-key release-signing-key.txt
+      - name: Publish immutable GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$RELEASE_TAG" release-assets/* --title "Thor $RELEASE_TAG" --verify-tag

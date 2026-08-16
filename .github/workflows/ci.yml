@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal --component clippy,rustfmt
+      - name: Check formatting
+        run: cargo +1.97.1 fmt --all -- --check
+      - name: Run strict linting
+        run: cargo +1.97.1 clippy --workspace --all-targets -- -D warnings
+      - name: Run tests
+        run: cargo +1.97.1 test --workspace
+      - name: Validate pack source
+        run: cargo +1.97.1 run --locked -p thor-build -- validate
+      - name: Check tracked harness definitions
+        run: cargo +1.97.1 run --locked -p thor-build -- transform --check
+
+  bootstrap-posix:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Test POSIX bootstrap without network access
+        run: sh scripts/test-install.sh
+
+  bootstrap-windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Test PowerShell bootstrap
+        shell: pwsh
+        run: Invoke-Pester -Path scripts/install.Tests.ps1 -CI -Output Detailed

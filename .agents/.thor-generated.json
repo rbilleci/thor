@@ -1,0 +1,8 @@
+{
+  "format": "thor-generated-output/v1",
+  "output": "codex-skills",
+  "paths": [
+    "skills/author-content/SKILL.md",
+    "skills/dispatch-work/SKILL.md"
+  ]
+}
