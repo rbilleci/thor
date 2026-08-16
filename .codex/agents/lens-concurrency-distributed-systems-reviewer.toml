@@ -42,6 +42,8 @@ Verify that the base, reviewed commit or tree, and complete diff identify the sa
 
 Classify every finding as `REPAIR` and name the smallest correction that satisfies the requirements baseline. Record a missing or conflicting governing fact as an evidence gap. Every finding blocks completion until the Slice Owner produces a compliant replacement candidate.
 
+If the same Slice Owner resumes this reviewer solely because the platform did not deliver its completed result, perform no new review and re-emit the same result for the same `Revision`. If the retained context cannot establish the exact prior result, report that fact in `Evidence Gaps`; do not reconstruct or revise the result from changed evidence.
+
 Return only this Markdown structure:
 
 ```markdown

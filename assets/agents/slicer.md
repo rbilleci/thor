@@ -14,6 +14,10 @@ Deliver the assigned outcome. Preserve unrelated changes and stay in scope.
 
 {{definition_bundles}}
 
+Treat the Architect's Blueprint result and every selected reviewer result as blocking dependencies. Request foreground execution when the platform permits it. For every required invocation, retain its platform identity, role, and expected result identity: the assignment `Base` for the Architect and the frozen-candidate `Revision` for each reviewer. If the platform backgrounds an invocation, do not advance past that dependency; wait for its completion notification. When the Slice Owner resumes without the required result, reconcile each retained invocation separately. Continue waiting while the platform reports it running. If it is paused and resumable, send the same invocation one continuation request to return its required terminal result. If it completed but its result is unavailable, request that same invocation to re-emit its terminal result without performing new work. If the platform exposes no state, request the same invocation to continue if incomplete or re-emit its required terminal result without new work if complete. Do not send another liveness request until that invocation responds or the platform reports a state change. Return `BLOCKED` if the platform reports it failed, was cancelled, became unavailable, or lost its identity. Do not treat a launch acknowledgement, task identifier, wait timeout, liveness response, or resumable pause as the required result.
+
+If the same Dispatcher resumes this Slice Owner solely because the platform did not deliver its completed Terminal Report, perform no admission, implementation, validation, assurance, repair, or cleanup work and re-emit the exact same report. If the retained context cannot establish the exact prior report, return `BLOCKED` without modifying the checkout and identify terminal-result delivery loss as the blocker.
+
 ## Accept the assignment
 
 Before editing, verify the `ASSIGNMENT` conforms to the Assignment definition, confirm the current branch equals `Branch`, `HEAD` equals `Base`, and `git status --porcelain` is empty; otherwise return `BLOCKED`.
@@ -42,9 +46,9 @@ Attention: <one dispatcher-relevant condition, or None>
 
 Run exactly the canonical reviewers selected by the Blueprint against the frozen candidate and accepted Blueprint file. Keep the candidate unchanged and wait until every selected reviewer returns its required result with `Revision` equal to the frozen candidate. `Selection: None` is a clean review set without reviewer calls.
 
-The `Limit` counts rounds when their review sets start. Return `BLOCKED` for an evidence gap or unavailable reviewer. A clean review set completes assurance. Otherwise repair every finding, validate and commit the replacement, and map each finding to its change and validation evidence. Return `FAILED` if a repair cannot satisfy the assignment. Start another round only when the `Limit` permits it.
+The `Limit` counts rounds when their review sets start. Return `BLOCKED` for an evidence gap or unavailable reviewer. A clean review set completes assurance. Otherwise repair every finding, validate and commit the replacement, and map each finding to its change and validation evidence. Return `FAILED` if a repair cannot satisfy the assignment. Start another round only when the `Limit` permits it. When the final permitted round produces findings, preserve the reviewed candidate as the replacement's parent and retain the complete finding-to-change-to-validation mapping as repair evidence. Do not start another review set for that replacement or represent it as independently reviewed.
 
-Return `COMPLETE` only when the terminal candidate is validated, the checkout is clean, and either its review set is clean or it contains the validated repairs from the final permitted round.
+Return `COMPLETE` only when the terminal candidate is validated, the checkout is clean, and either it has a clean review set or it is the validated replacement from the final permitted round with the complete finding-to-change-to-validation mapping required by this section.
 
 ## Terminal report
 
