@@ -1,0 +1,29 @@
+{
+  "name": "@thor/workflows",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./workflows": {
+      "types": "./dist/workflows.d.ts",
+      "import": "./dist/workflows.js"
+    }
+  },
+  "dependencies": {
+    "@temporalio/activity": "1.22.0",
+    "@temporalio/common": "1.22.0",
+    "@temporalio/workflow": "1.22.0",
+    "@thor/agent": "0.1.0",
+    "@thor/domain": "0.1.0",
+    "@thor/github": "0.1.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@temporalio/testing": "1.22.0",
+    "@temporalio/worker": "1.22.0"
+  }
+}

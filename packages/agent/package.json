@@ -1,0 +1,18 @@
+{
+  "name": "@thor/agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.233",
+    "@openai/codex-sdk": "0.147.0",
+    "@thor/domain": "0.1.0",
+    "zod": "4.4.3"
+  }
+}

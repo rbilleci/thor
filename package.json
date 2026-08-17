@@ -1,0 +1,44 @@
+{
+  "name": "thor",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Autonomous software-delivery orchestration with Temporal and GitHub",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22 <23"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean && node scripts/clean.mjs",
+    "dev:worker": "node --env-file-if-exists=.env --import tsx apps/worker/src/main.ts",
+    "dev:synchronizer": "node --env-file-if-exists=.env --import tsx apps/synchronizer/src/main.ts",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint .",
+    "temporal:down": "docker compose down",
+    "temporal:up": "docker compose up -d --wait",
+    "thor": "node --env-file-if-exists=.env --import tsx apps/cli/src/main.ts",
+    "predev:worker": "npm run build",
+    "predev:synchronizer": "npm run build",
+    "prethor": "npm run build",
+    "test": "npm run build && vitest run --exclude tests/integration/**",
+    "test:integration": "npm run build && vitest run tests/integration",
+    "typecheck": "tsc -b --pretty false"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "22.20.1",
+    "@vitest/coverage-v8": "4.1.10",
+    "eslint": "10.8.1",
+    "prettier": "3.9.6",
+    "tsx": "4.23.12",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.67.0",
+    "vitest": "4.1.10"
+  }
+}

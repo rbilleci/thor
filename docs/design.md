@@ -6,13 +6,19 @@ This specification defines an autonomous software-development orchestration syst
 
 - **Temporal Open Source** for local development and testing.
 - **Temporal Cloud** as the production orchestration service when deployed remotely.
-- **GitHub repositories** as the source of truth for code, pull requests, commits, and software artifacts.
-- **GitHub Projects** as the human-facing system of record for tickets, planning state, dependencies, prioritization, and workflow status.
-- **AI agent workers** as the execution layer for planning, implementation, repair, review, and selected maintenance tasks.
+- **GitHub repositories** as the source of truth for code, pull requests, commits, and software
+  artifacts.
+- **GitHub Projects** as the human-facing system of record for tickets, planning state,
+  dependencies, prioritization, and workflow status.
+- **AI agent workers** as the execution layer for planning, implementation, repair, review, and
+  selected maintenance tasks.
 
-The design assumes that most work proceeds autonomously, while selected tickets can require human review at explicitly configured gates.
+The design assumes that most work proceeds autonomously, while selected tickets can require human
+review at explicitly configured gates.
 
-The architecture intentionally avoids a separate Git-based lease service. Temporal provides durable workflow execution, task dispatch, retries, heartbeats, timers, cancellation, and worker coordination. GitHub remains authoritative for business-facing project state.
+The architecture intentionally avoids a separate Git-based lease service. Temporal provides durable
+workflow execution, task dispatch, retries, heartbeats, timers, cancellation, and worker
+coordination. GitHub remains authoritative for business-facing project state.
 
 ---
 
@@ -20,7 +26,8 @@ The architecture intentionally avoids a separate Git-based lease service. Tempor
 
 ### 2.1 Separate business state from execution state
 
-GitHub Projects describes what the team believes should happen and the coarse lifecycle state of the work. Temporal describes how automated execution is currently attempting to make it happen.
+GitHub Projects describes what the team believes should happen and the coarse lifecycle state of the
+work. Temporal describes how automated execution is currently attempting to make it happen.
 
 Examples of **GitHub Project state**:
 
@@ -56,7 +63,8 @@ GitHub repositories and Projects remain the canonical location for:
 - merge state;
 - human interventions.
 
-Temporal must react to GitHub changes rather than attempt to overwrite or outvote human actions blindly.
+Temporal must react to GitHub changes rather than attempt to overwrite or outvote human actions
+blindly.
 
 ### 2.3 Temporal is authoritative for orchestration
 
@@ -75,11 +83,16 @@ Temporal owns:
 
 ### 2.4 Prefer idempotent external effects
 
-Activities that mutate GitHub must be designed for retry safety. A worker can perform an external side effect and then fail before Temporal records successful completion. Therefore operations such as creating pull requests, comments, branches, labels, or backlog issues should use stable idempotency keys or find-or-create semantics.
+Activities that mutate GitHub must be designed for retry safety. A worker can perform an external
+side effect and then fail before Temporal records successful completion. Therefore operations such
+as creating pull requests, comments, branches, labels, or backlog issues should use stable
+idempotency keys or find-or-create semantics.
 
 ### 2.5 Human intervention is an explicit policy path
 
-Human approval is not the default lifecycle. Most tickets should run autonomously. Human gates are introduced only when configured by policy or when the system escalates because a risk threshold or uncertainty threshold is exceeded.
+Human approval is not the default lifecycle. Most tickets should run autonomously. Human gates are
+introduced only when configured by policy or when the system escalates because a risk threshold or
+uncertainty threshold is exceeded.
 
 ---
 
@@ -115,7 +128,50 @@ Human approval is not the default lifecycle. Most tickets should run autonomousl
                     Temporal Cloud in production)
 ```
 
-The Project Synchronizer is deliberately simple. It observes GitHub Project changes and translates them into Temporal Signals or Updates. It does not contain business workflow logic.
+The Project Synchronizer is deliberately simple. It observes GitHub Project changes and translates
+them into Temporal Signals or Updates. It does not contain business workflow logic.
+
+## 3.1 Implementation Runtime and Agent Harnesses
+
+Thor is implemented in strict TypeScript on Node.js 22. Workflows, Activities, workers, the Project
+Synchronizer, and operational tooling use the Temporal TypeScript SDK. The TypeScript SDK is
+selected instead of the Temporal Rust SDK because it provides a mature production surface while
+allowing both supported agent harnesses to run through their official SDKs in the same worker
+process.
+
+The required SDKs are:
+
+- `@temporalio/client`, `@temporalio/worker`, `@temporalio/workflow`, and `@temporalio/activity` for
+  orchestration;
+- `@anthropic-ai/claude-agent-sdk` for Claude;
+- `@openai/codex-sdk` for Codex.
+
+Claude and Codex implement one provider-neutral agent harness interface. Provider SDK objects and
+response types remain inside their adapters. Workflow payloads contain only Thor domain types.
+
+All agent SDK calls execute inside Temporal Activities. No Workflow may import an agent SDK, access
+the filesystem or network, read process environment, use wall-clock time, or perform another
+non-deterministic effect.
+
+## 3.2 Versioned Agent Execution Packages
+
+Every harness has a separately versioned execution profile containing:
+
+- a base prompt;
+- an `AGENTS.md` instruction document;
+- built-in skills for blueprinting, implementation, review, synthesis, and repair;
+- non-secret harness configuration and permission policy.
+
+Before an agent Activity starts, Thor assembles an immutable execution package from the harness
+profile, ticket context, approved blueprint, execution purpose, and custom skills selected from
+ticket metadata. Selectors may consider work type, component, risk flags, acceptance criteria,
+affected areas, and review role.
+
+The package records content digests and versions for the prompt, instructions, skills, and
+non-secret configuration. These identifiers are returned with the Activity result and correlated
+with the Workflow, review run, and repair pass. Credentials are provided only through worker
+configuration and must never be included in Workflow payloads, execution packages, GitHub comments,
+or logs.
 
 ---
 
@@ -132,7 +188,8 @@ The primary board should use the following lifecycle states:
    Optional exploratory phase for unclear requirements, research, spikes, or problem clarification.
 
 3. **Design / Blueprint**  
-   A planning agent analyzes the repository, architecture, dependencies, acceptance criteria, risks, and implementation approach.
+   A planning agent analyzes the repository, architecture, dependencies, acceptance criteria, risks,
+   and implementation approach.
 
 4. **Awaiting Blueprint Approval**  
    Used only when the ticket's approval policy requires human review before implementation.
@@ -165,12 +222,14 @@ The primary board should use the following lifecycle states:
     Work has been merged and required post-merge bookkeeping is complete.
 
 14. **Blocked**  
-    Work cannot progress because of an external dependency, unresolved requirement, policy condition, or environmental issue.
+    Work cannot progress because of an external dependency, unresolved requirement, policy
+    condition, or environmental issue.
 
 15. **Cancelled**  
     Work was intentionally terminated and should not continue.
 
-Not every team needs every column visible in every saved view. The underlying status vocabulary can be richer than the default Kanban board.
+Not every team needs every column visible in every saved view. The underlying status vocabulary can
+be richer than the default Kanban board.
 
 ---
 
@@ -228,9 +287,11 @@ These fields allow the orchestrator to route work without embedding policy in is
 Recommended saved views include:
 
 ### Delivery Board
+
 Grouped by Status. This is the default operational Kanban.
 
 ### Ready for Agents
+
 Filters:
 
 - Status = Ready
@@ -238,25 +299,31 @@ Filters:
 - not blocked
 
 ### Human Work
+
 Filters:
 
 - Execution Mode = Human
 
 ### Review Queue
+
 Filters:
 
 - Status in Ready for Review, In Review, Repairing, Re-review, Awaiting Human Merge Review
 
 ### Blocked
+
 Shows all currently blocked work and the dependencies responsible.
 
 ### Current Iteration
+
 Grouped by component or human owner.
 
 ### Roadmap
+
 Roadmap layout for larger features and target dates.
 
 ### Hierarchy
+
 Table grouped by Parent Issue, showing sub-issue progress.
 
 ---
@@ -271,12 +338,12 @@ Example:
 
 ```text
 Feature: Add organization-level audit export
-âââ Define export schema
-âââ Implement API endpoint
-âââ Implement background export worker
-âââ Add authorization checks
-âââ Add integration tests
-âââ Add user documentation
+├── Define export schema
+├── Implement API endpoint
+├── Implement background export worker
+├── Add authorization checks
+├── Add integration tests
+└── Add user documentation
 ```
 
 Parent/sub-issue relationships answer:
@@ -322,18 +389,24 @@ Blocked by / blocking
 
 ## 6.1 Purpose
 
-The Blueprint phase exists so that expensive, high-reasoning models can perform repository-wide analysis before cheaper implementation agents begin work.
+The Blueprint phase exists so that expensive, high-reasoning models can perform repository-wide
+analysis before cheaper implementation agents begin work.
 
 The `Ready` state should mean that implementation can proceed with bounded ambiguity.
 
 ## 6.2 Blueprint artifact
 
-The blueprint should be stored as a durable GitHub artifact associated with the ticket. Depending on project conventions, this can be:
+The blueprint should be stored as a durable GitHub artifact associated with the ticket. Depending on
+project conventions, this can be:
 
 - a structured section in the issue;
 - a linked Markdown document in the repository;
 - a pull-request planning document;
 - or another repository-tracked planning artifact.
+
+Thor's default implementation upserts a structured blueprint comment with a stable idempotency
+marker. Replanning updates that artifact in place and records the producing execution-package digest
+without publishing prompt contents.
 
 Recommended blueprint structure:
 
@@ -359,7 +432,8 @@ Planning depth controls the amount of analysis:
 
 ```text
 None
-    obvious small changes; no dedicated blueprint workflow
+    obvious small changes; no dedicated blueprint agent execution; derive and persist a bounded
+    plan deterministically from the ticket and acceptance criteria
 
 Light
     concise implementation plan and affected-area analysis
@@ -448,7 +522,8 @@ Use a deterministic Workflow ID derived from the stable GitHub identifier, for e
 github-project-item:<graphql-node-id>
 ```
 
-A human-readable repository and issue number may be stored as workflow metadata but should not be the sole durable identifier because names can change.
+A human-readable repository and issue number may be stored as workflow metadata but should not be
+the sole durable identifier because names can change.
 
 ## 8.2 No separate lease engine
 
@@ -473,7 +548,8 @@ retry count              -> Activity attempt / Retry Policy
 job identity             -> Workflow ID
 ```
 
-A separate lease is only required for a scarce external resource that can also be manipulated outside Temporal.
+A separate lease is only required for a scarce external resource that can also be manipulated
+outside Temporal.
 
 ---
 
@@ -481,7 +557,8 @@ A separate lease is only required for a scarce external resource that can also b
 
 ## 9.1 Project Synchronizer
 
-A small stateless synchronizer observes GitHub Project changes through polling, webhooks, or a combination of both.
+A small stateless synchronizer observes GitHub Project changes through polling, webhooks, or a
+combination of both.
 
 Its responsibility is limited to:
 
@@ -508,6 +585,13 @@ Workflow decides whether to pause, cancel, or redirect execution
 
 The system must not blindly overwrite human changes.
 
+`Blocked` and `Cancelled` immediately cancel active agent Activities. An unexpected human status
+transition is treated as a conflict: the Workflow preserves its suspended lifecycle state,
+conditionally surfaces `Blocked`, and waits for another GitHub event. A change to ticket intent,
+acceptance criteria, dependencies, or execution policy also blocks current work and requires a new
+blueprint before resuming. Only the documented approval transitions are interpreted as gate
+decisions.
+
 ## 9.3 Agent-initiated Project transitions
 
 Agents may propose status transitions such as:
@@ -517,7 +601,9 @@ Agents may propose status transitions such as:
 - Ready to Merge -> Done
 - In Progress -> Blocked
 
-Before performing material GitHub mutations, the Activity should re-read current GitHub state and apply an idempotent or conditional update. If human changes conflict materially, control returns to the Workflow for policy resolution.
+Before performing material GitHub mutations, the Activity should re-read current GitHub state and
+apply an idempotent or conditional update. If human changes conflict materially, control returns to
+the Workflow for policy resolution.
 
 ---
 
@@ -573,16 +659,17 @@ After implementation, a dedicated Review Orchestrator launches ten focused revie
 
 A suggested default reviewer set is:
 
-1. **Correctness reviewer** â logic errors, edge cases, specification compliance.
-2. **Architecture reviewer** â layering, coupling, boundaries, design consistency.
-3. **Security reviewer** â authentication, authorization, injection, secrets, unsafe behavior.
-4. **Performance reviewer** â complexity, contention, memory, latency, scalability.
-5. **Testing reviewer** â coverage, test quality, missing scenarios, brittleness.
-6. **API / compatibility reviewer** â API contracts, backwards compatibility, versioning.
-7. **Data / migration reviewer** â schemas, migrations, consistency, rollback implications.
-8. **Observability / operability reviewer** â logs, metrics, diagnostics, supportability.
-9. **Maintainability reviewer** â readability, duplication, modularity, technical debt.
-10. **Product / specification reviewer** â acceptance criteria, user-visible behavior, blueprint compliance.
+1. **Correctness reviewer** — logic errors, edge cases, specification compliance.
+2. **Architecture reviewer** — layering, coupling, boundaries, design consistency.
+3. **Security reviewer** — authentication, authorization, injection, secrets, unsafe behavior.
+4. **Performance reviewer** — complexity, contention, memory, latency, scalability.
+5. **Testing reviewer** — coverage, test quality, missing scenarios, brittleness.
+6. **API / compatibility reviewer** — API contracts, backwards compatibility, versioning.
+7. **Data / migration reviewer** — schemas, migrations, consistency, rollback implications.
+8. **Observability / operability reviewer** — logs, metrics, diagnostics, supportability.
+9. **Maintainability reviewer** — readability, duplication, modularity, technical debt.
+10. **Product / specification reviewer** — acceptance criteria, user-visible behavior, blueprint
+    compliance.
 
 The set can be changed per repository or ticket type.
 
@@ -612,13 +699,17 @@ confidence
 The synthesis stage normalizes and deduplicates findings into:
 
 ### BLOCKING
+
 Must be resolved before merge.
 
 ### NON_BLOCKING_FIX_NOW
+
 Should be corrected in the current change although it does not independently block merge.
 
 ### DEFER_CANDIDATE
-A valid issue that may be intentionally deferred if the current work is ultimately accepted for merge.
+
+A valid issue that may be intentionally deferred if the current work is ultimately accepted for
+merge.
 
 No deferred GitHub issue is created at this point.
 
@@ -638,7 +729,8 @@ A dedicated synthesis step consumes all ten review results and performs:
 
 Reviewers discover. The synthesizer arbitrates. Repair workers act.
 
-This separation prevents ten reviewers from independently creating tickets or mutating the pull request in inconsistent ways.
+This separation prevents ten reviewers from independently creating tickets or mutating the pull
+request in inconsistent ways.
 
 ---
 
@@ -673,7 +765,8 @@ architectural or requirements failure
     -> Design / Blueprint
 ```
 
-The synthesis stage should classify whether the work remains a repair or requires a broader lifecycle rollback.
+The synthesis stage should classify whether the work remains a repair or requires a broader
+lifecycle rollback.
 
 ## 13.3 Repair input
 
@@ -686,7 +779,8 @@ The repair worker receives:
 - relevant reviewer evidence;
 - previous repair attempts.
 
-The repair worker should not independently reinterpret unrelated reviewer findings unless needed to make the repairs coherent.
+The repair worker should not independently reinterpret unrelated reviewer findings unless needed to
+make the repairs coherent.
 
 ---
 
@@ -698,7 +792,8 @@ The default strategy should be **impact-based re-review**:
 
 1. rerun every reviewer whose finding was repaired;
 2. always rerun correctness and testing reviewers;
-3. rerun architecture, security, data, API, or performance reviewers when the repair touched their concern area;
+3. rerun architecture, security, data, API, or performance reviewers when the repair touched their
+   concern area;
 4. rerun the full review set if the repair caused substantial change or architectural movement.
 
 This controls model cost while preserving assurance.
@@ -715,7 +810,8 @@ All findings, repair commits, and eventual deferred issues reference the origina
 
 ### 14.1 Convergence and escalation
 
-The repair loop must be bounded by policy even though Temporal can execute it indefinitely. Recommended controls are:
+The repair loop must be bounded by policy even though Temporal can execute it indefinitely.
+Recommended controls are:
 
 - track `repair_pass_number`;
 - track whether blocking-finding count and severity are decreasing;
@@ -736,7 +832,8 @@ else:
     escalate
 ```
 
-Escalation does not imply failure of the ticket. Depending on cause, the workflow may move to `In Progress`, `Design / Blueprint`, `Blocked`, or a durable human-review wait.
+Escalation does not imply failure of the ticket. Depending on cause, the workflow may move to
+`In Progress`, `Design / Blueprint`, `Blocked`, or a durable human-review wait.
 
 ---
 
@@ -781,7 +878,8 @@ The merge gate performs:
 
 The key invariant is:
 
-> The system never knowingly merges unresolved review findings unless every accepted deferral has been durably represented in the backlog.
+> The system never knowingly merges unresolved review findings unless every accepted deferral has
+> been durably represented in the backlog.
 
 ## 15.3 Deferred issue content
 
@@ -799,7 +897,8 @@ Each generated deferred issue should contain:
 - relevant commit SHA or PR state;
 - acceptance criteria where possible.
 
-It should also receive the appropriate Project fields such as Type, Priority, Component, Agent Policy, and Planning Depth.
+It should also receive the appropriate Project fields such as Type, Priority, Component, Agent
+Policy, and Planning Depth.
 
 ---
 
@@ -821,7 +920,8 @@ merge_allowed =
 
 If the ticket is autonomous, Temporal may perform the merge once the gate evaluates true.
 
-If human pre-merge approval is required, Temporal enters a durable waiting state until GitHub signals approval or change requests.
+If human pre-merge approval is required, Temporal enters a durable waiting state until GitHub
+signals approval or change requests.
 
 ---
 
@@ -839,7 +939,8 @@ Activities should define explicit retry policies, including:
 
 ## 17.2 Heartbeats
 
-Long-running Activities such as implementation, complex review, or repository analysis should heartbeat.
+Long-running Activities such as implementation, complex review, or repository analysis should
+heartbeat.
 
 Heartbeat payloads may contain lightweight progress information such as:
 
@@ -852,7 +953,8 @@ Heartbeats are not a substitute for durable business state in GitHub.
 
 ## 17.3 Cancellation
 
-A human Project change may trigger cancellation or redirection. Activities should periodically observe Temporal cancellation and terminate safely.
+A human Project change may trigger cancellation or redirection. Activities should periodically
+observe Temporal cancellation and terminate safely.
 
 ## 17.4 Idempotency
 
@@ -878,10 +980,13 @@ move Project state
 
 ## 18. GitHub Attachments and Artifacts
 
-GitHub issue and pull-request conversations support direct file attachments. At the time this specification was reviewed, GitHub documents the following per-file limits for conversation attachments:
+GitHub issue and pull-request conversations support direct file attachments. At the time this
+specification was reviewed, GitHub documents the following per-file limits for conversation
+attachments:
 
 - **images and GIFs:** 10 MB;
-- **videos:** 10 MB for repositories owned by users or organizations on a free GitHub plan, or 100 MB on a paid GitHub plan;
+- **videos:** 10 MB for repositories owned by users or organizations on a free GitHub plan, or 100
+  MB on a paid GitHub plan;
 - **other supported files:** 25 MB.
 
 GitHub issues can therefore carry small human-oriented artifacts such as:
@@ -892,9 +997,13 @@ GitHub issues can therefore carry small human-oriented artifacts such as:
 - diagnostic archives;
 - small text or data files.
 
-For files committed to repositories, GitHub warns above 50 MiB and enforces a 100 MiB per-object limit for normal Git operations; larger files should use Git LFS. Browser-based repository uploads are limited to 25 MiB per file. These service limits are external constraints and should be rechecked if attachment handling becomes part of an automated contract.
+For files committed to repositories, GitHub warns above 50 MiB and enforces a 100 MiB per-object
+limit for normal Git operations; larger files should use Git LFS. Browser-based repository uploads
+are limited to 25 MiB per file. These service limits are external constraints and should be
+rechecked if attachment handling becomes part of an automated contract.
 
-Large generated artifacts, datasets, binaries, and build outputs should not be treated as ticket attachments. Prefer:
+Large generated artifacts, datasets, binaries, and build outputs should not be treated as ticket
+attachments. Prefer:
 
 - repository commits for source-sized text artifacts;
 - GitHub Releases;
@@ -902,7 +1011,8 @@ Large generated artifacts, datasets, binaries, and build outputs should not be t
 - Git LFS;
 - external object storage.
 
-Blueprints and review outputs should preferably remain text-native and repository- or issue-linked for auditability and machine consumption.
+Blueprints and review outputs should preferably remain text-native and repository- or issue-linked
+for auditability and machine consumption.
 
 ---
 
@@ -912,37 +1022,39 @@ A practical decomposition is:
 
 ```text
 TicketWorkflow
-â
-âââ Blueprint phase
-â   âââ BlueprintActivity / BlueprintChildWorkflow
-â
-âââ optional blueprint approval wait
-â
-âââ Implementation phase
-â   âââ ImplementationActivity
-â
-âââ ReviewOrchestrator
-â   âââ Reviewer 1
-â   âââ Reviewer 2
-â   âââ ...
-â   âââ Reviewer 10
-â
-âââ Synthesis
-â
-âââ Repair loop
-â   âââ RepairActivity
-â   âââ targeted/full ReReview
-â
-âââ optional human merge approval wait
-â
-âââ DeferredIssueMaterialization
-â
-âââ MergeActivity
-â
-âââ Completion bookkeeping
+│
+├── Blueprint phase
+│   └── BlueprintActivity / BlueprintChildWorkflow
+│
+├── optional blueprint approval wait
+│
+├── Implementation phase
+│   └── ImplementationActivity
+│
+├── ReviewOrchestrator
+│   ├── Reviewer 1
+│   ├── Reviewer 2
+│   ├── ...
+│   └── Reviewer 10
+│
+├── Synthesis
+│
+├── Repair loop
+│   ├── RepairActivity
+│   └── targeted/full ReReview
+│
+├── optional human merge approval wait
+│
+├── DeferredIssueMaterialization
+│
+├── MergeActivity
+│
+└── Completion bookkeeping
 ```
 
-Review may be implemented as parallel Activities or Child Workflows. Child Workflows are preferable when individual reviewer execution requires its own durable lifecycle, retries, signals, or substantial state.
+Review may be implemented as parallel Activities or Child Workflows. Child Workflows are preferable
+when individual reviewer execution requires its own durable lifecycle, retries, signals, or
+substantial state.
 
 ---
 
@@ -1023,9 +1135,11 @@ Recommended correlation identifiers:
 - repair pass number;
 - deferred issue IDs.
 
-A human inspecting a GitHub ticket should be able to identify the associated Temporal Workflow. A Temporal operator should be able to identify the corresponding GitHub issue and pull request.
+A human inspecting a GitHub ticket should be able to identify the associated Temporal Workflow. A
+Temporal operator should be able to identify the corresponding GitHub issue and pull request.
 
-Detailed Activity retries and heartbeats remain in Temporal. Human-relevant summaries belong in GitHub.
+Detailed Activity retries and heartbeats remain in Temporal. Human-relevant summaries belong in
+GitHub.
 
 ---
 
@@ -1033,7 +1147,8 @@ Detailed Activity retries and heartbeats remain in Temporal. Human-relevant summ
 
 ### Local development / testing
 
-Use Temporal Open Source locally with the standard Temporal UI and an appropriate local persistence configuration.
+Use Temporal Open Source locally with the standard Temporal UI and an appropriate local persistence
+configuration.
 
 The local environment should support:
 
@@ -1070,9 +1185,15 @@ Separate permissions where practical between:
 - repository content write;
 - administrative operations.
 
-A reviewer generally should not need merge authority. A blueprint worker generally should not need repository write authority. The merge Activity should use a narrowly scoped credential appropriate to repository policy.
+A reviewer generally should not need merge authority. A blueprint worker generally should not need
+repository write authority. The merge Activity should use a narrowly scoped credential appropriate
+to repository policy.
 
 Human review policy should not be bypassable by ordinary worker credentials.
+
+An approval decision is valid only while its corresponding Workflow gate is active. A decision
+received before the blueprint or automated-review artifact exists must be ignored rather than queued
+as approval for a future artifact.
 
 ---
 
@@ -1114,16 +1235,19 @@ Human involvement occurs only when:
 The implementation should preserve the following invariants:
 
 1. **One orchestration authority per ticket.**  
-   A deterministic Temporal Workflow ID represents the logical execution lifecycle of a GitHub Project item.
+   A deterministic Temporal Workflow ID represents the logical execution lifecycle of a GitHub
+   Project item.
 
 2. **GitHub remains authoritative for business state.**  
    Human changes are treated as external events, not corruption.
 
 3. **Temporal remains authoritative for execution state.**  
-   Retries, attempts, heartbeats, waiting, cancellation, and parallel execution are not implemented through GitHub fields.
+   Retries, attempts, heartbeats, waiting, cancellation, and parallel execution are not implemented
+   through GitHub fields.
 
 4. **External effects are idempotent.**  
-   Activity retries must not duplicate pull requests, backlog issues, comments, or other externally visible effects.
+   Activity retries must not duplicate pull requests, backlog issues, comments, or other externally
+   visible effects.
 
 5. **Ready means executable.**  
    A ticket does not enter Ready until its configured planning requirements are satisfied.
@@ -1132,7 +1256,8 @@ The implementation should preserve the following invariants:
    Ten focused reviewers produce structured findings that are synthesized centrally.
 
 7. **Repair remains part of review.**  
-   Ordinary review remediation uses Repairing/Re-review instead of resetting the ticket to initial In Progress.
+   Ordinary review remediation uses Repairing/Re-review instead of resetting the ticket to initial
+   In Progress.
 
 8. **Deferrals are provisional until merge is accepted.**  
    Review-time deferral candidates do not create backlog clutter prematurely.
@@ -1141,38 +1266,62 @@ The implementation should preserve the following invariants:
    Every accepted deferral is materialized as a durable GitHub backlog item before merge.
 
 10. **Human gates are explicit and durable.**  
-    Temporal waits for human decisions without occupying workers or relying on transient process state.
+    Temporal waits for human decisions without occupying workers or relying on transient process
+    state.
 
 ---
 
 ## 26. External Platform Assumptions and References
 
-This design intentionally depends on public GitHub and Temporal capabilities rather than private implementation details. The following platform assumptions were verified when this specification was reviewed on 2026-08-16:
+This design intentionally depends on public GitHub and Temporal capabilities rather than private
+implementation details. The following platform assumptions were verified when this specification was
+reviewed on 2026-08-16:
 
 - GitHub issues support native blocking dependencies (`blocked by` / `blocking`).
-- GitHub supports native sub-issue hierarchies and Project fields for parent issue and sub-issue progress.
-- GitHub issue and pull-request conversations support file attachments with the limits described in Section 18.
-- Temporal supports Activity Retry Policies, Heartbeats, Workflow Signals/Updates, Task Queues, and Child Workflows.
+- GitHub supports native sub-issue hierarchies and Project fields for parent issue and sub-issue
+  progress.
+- GitHub issue and pull-request conversations support file attachments with the limits described in
+  Section 18.
+- Temporal supports Activity Retry Policies, Heartbeats, Workflow Signals/Updates, Task Queues, and
+  Child Workflows.
 
 Reference documentation:
 
-- GitHub issue dependencies: <https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/creating-issue-dependencies>
-- GitHub sub-issues: <https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/browsing-sub-issues>
-- GitHub Project parent/sub-issue progress fields: <https://docs.github.com/en/issues/planning-and-tracking-with-projects/understanding-fields/about-parent-issue-and-sub-issue-progress-fields>
-- GitHub file attachments: <https://docs.github.com/en/get-started/writing-on-github/working-with-advanced-formatting/attaching-files>
-- GitHub large files: <https://docs.github.com/en/repositories/working-with-files/managing-large-files/about-large-files-on-github>
+- GitHub issue dependencies:
+  <https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/creating-issue-dependencies>
+- GitHub sub-issues:
+  <https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/browsing-sub-issues>
+- GitHub Project parent/sub-issue progress fields:
+  <https://docs.github.com/en/issues/planning-and-tracking-with-projects/understanding-fields/about-parent-issue-and-sub-issue-progress-fields>
+- GitHub file attachments:
+  <https://docs.github.com/en/get-started/writing-on-github/working-with-advanced-formatting/attaching-files>
+- GitHub large files:
+  <https://docs.github.com/en/repositories/working-with-files/managing-large-files/about-large-files-on-github>
 - Temporal Activity operations and heartbeats: <https://docs.temporal.io/activity-operations>
 - Temporal Child Workflows: <https://docs.temporal.io/child-workflows>
 - Temporal terminology and Retry Policies: <https://docs.temporal.io/glossary>
+- Temporal TypeScript SDK: <https://docs.temporal.io/develop/typescript>
+- Claude Agent SDK: <https://code.claude.com/docs/en/agent-sdk/overview>
+- Codex SDK: <https://learn.chatgpt.com/docs/codex-sdk>
 
-These references are informative rather than normative. The workflow invariants in this specification should remain stable even if provider APIs or UI details evolve.
+These references are informative rather than normative. The workflow invariants in this
+specification should remain stable even if provider APIs or UI details evolve.
 
 ---
 
 ## 27. Summary
 
-The system treats GitHub Projects as the planning and human collaboration surface, GitHub repositories as the software source of truth, and Temporal as the durable execution engine.
+The system treats GitHub Projects as the planning and human collaboration surface, GitHub
+repositories as the software source of truth, and Temporal as the durable execution engine.
 
-A strong planning model produces a blueprint before work becomes Ready. Implementation agents execute against that blueprint. Ten specialized reviewers inspect the result in parallel. A synthesis stage converts their output into blocking repairs, immediate non-blocking repairs, or provisional deferrals. Repairs remain within the review lifecycle and undergo targeted re-review. Deferred findings are only converted into durable backlog issues once the work has passed its merge decision and is actually proceeding toward merge. Human approval is exceptional and policy-controlled rather than mandatory.
+A strong planning model produces a blueprint before work becomes Ready. Implementation agents
+execute against that blueprint. Ten specialized reviewers inspect the result in parallel. A
+synthesis stage converts their output into blocking repairs, immediate non-blocking repairs, or
+provisional deferrals. Repairs remain within the review lifecycle and undergo targeted re-review.
+Deferred findings are only converted into durable backlog issues once the work has passed its merge
+decision and is actually proceeding toward merge. Human approval is exceptional and
+policy-controlled rather than mandatory.
 
-This separation keeps the Project board intelligible to humans while allowing Temporal to carry the detailed resilience, concurrency, retry, waiting, and failure-recovery semantics required for autonomous software delivery.
+This separation keeps the Project board intelligible to humans while allowing Temporal to carry the
+detailed resilience, concurrency, retry, waiting, and failure-recovery semantics required for
+autonomous software delivery.

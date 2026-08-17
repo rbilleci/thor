@@ -1,6 +1,14 @@
-# Rust build output
-/target/
-**/*.rs.bk
+# TypeScript and Node.js
+node_modules/
+dist/
+dist-tests/
+coverage/
+*.tsbuildinfo
+npm-debug.log*
+
+# Rust build artifacts (kept for mixed-language tools and future helpers)
+target/
+*.rs.bk
 *.pdb
 
 # Local environment and secrets
@@ -13,6 +21,13 @@
 .vscode/
 *.swp
 *.swo
+
+# Local Temporal data
+.temporal/
+
+# Local repository mirrors and isolated agent worktrees
+repositories/
+.thor-worktrees/
 
 # Operating-system metadata
 .DS_Store

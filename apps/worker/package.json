@@ -1,0 +1,16 @@
+{
+  "name": "@thor/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/main.ts",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@temporalio/worker": "1.22.0",
+    "@thor/agent": "0.1.0",
+    "@thor/runtime": "0.1.0",
+    "@thor/workflows": "0.1.0"
+  }
+}
