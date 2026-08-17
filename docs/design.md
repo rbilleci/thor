@@ -66,6 +66,12 @@ GitHub repositories and Projects remain the canonical location for:
 Temporal must react to GitHub changes rather than attempt to overwrite or outvote human actions
 blindly.
 
+Checked-in Thor declarations define the automation contract used to interpret and provision that
+state: semantic field mappings, supported Workflow profiles, board projection, agent roles, and
+versioned defaults. This does not make Git authoritative over live ticket values. A mismatch between
+the declaration and Project structure is explicit configuration drift to validate and resolve; it is
+not permission to overwrite human state blindly.
+
 ### 2.3 Temporal is authoritative for orchestration
 
 Temporal owns:
@@ -104,12 +110,12 @@ uncertainty threshold is exceeded.
                          | tickets / Kanban     |
                          +----------+-----------+
                                     |
-                          poll / webhook events
+                     polling through a GitHub Activity
                                     |
                                     v
                          +----------------------+
                          | Project Synchronizer |
-                         | stateless bridge     |
+                         | Temporal Workflow    |
                          +----------+-----------+
                                     |
                           Signals / Updates
@@ -128,8 +134,12 @@ uncertainty threshold is exceeded.
                     Temporal Cloud in production)
 ```
 
-The Project Synchronizer is deliberately simple. It observes GitHub Project changes and translates
-them into Temporal Signals or Updates. It does not contain business workflow logic.
+The Project Synchronizer is deliberately simple. One durable `ProjectSynchronizerWorkflow` per
+managed Project owns the polling cadence through Workflow timers. Each complete GitHub scan and each
+dispatch are Activities. The synchronizer process hosts those Activities and ensures the
+deterministic synchronizer Workflow is running; it does not keep the cadence or reconciliation state
+only in process memory. Observations become Temporal Signals or new ticket Workflows, while business
+workflow logic remains in `TicketWorkflow`.
 
 ## 3.1 Implementation Runtime and Agent Harnesses
 
@@ -172,6 +182,75 @@ non-secret configuration. These identifiers are returned with the Activity resul
 with the Workflow, review run, and repair pass. Credentials are provided only through worker
 configuration and must never be included in Workflow payloads, execution packages, GitHub comments,
 or logs.
+
+## 3.3 Versioned Delivery Project Declarations
+
+Every managed Project has a checked-in, schema-versioned `DeliveryProject` declaration. It may live
+in Thor's repository or a dedicated protected control-plane configuration repository; it does not
+need to live in every repository whose issues appear in the Project. The initial serialization is
+strict JSON so configuration can be parsed with the Node.js standard library. A future YAML surface
+must compile to the same domain schema and may not introduce different semantics.
+
+The declaration contains:
+
+- Project owner, identity, visibility, associated repositories, and repository base branches;
+- semantic Project fields, their physical display names, allowed option labels, and whether an item
+  must supply a value;
+- supported saved-view names, layouts, filters, and visible semantic fields;
+- explicit ticket defaults used only when a semantic field is intentionally absent from the
+  declaration or declared optional;
+- a versioned Workflow profile and implementation identifier;
+- projection of internal Temporal lifecycle states onto semantic, human-facing board states;
+- entry states, cancellation controls, and human approval-transition meanings;
+- human-intervention policy for ticket edits, dependency changes, unexpected statuses, unreadable
+  items, and Project-item removal;
+- dependency-completion semantics and whether a successful merge closes the originating issue;
+- the configured reviewer set;
+- logical phase-to-agent-role assignments;
+- named Claude/Codex agent profiles, resource profiles, and non-secret execution configuration;
+- custom skill selectors based on purpose, reviewer, work type, component, risk, and ticket context.
+
+Thor validates cross-references before contacting GitHub. It then discovers the live Project and
+compiles the declaration into an immutable runtime binding containing Project, field, and option
+node IDs plus declaration, agent-profile, and binding digests. GitHub display names and provider
+types do not cross this binding into orchestration-domain decisions.
+
+```text
+checked-in DeliveryProject declaration
+                |
+                v
+schema + semantic validation
+                |
+                v
+plan / idempotent apply / live discovery
+                |
+                v
+compiled runtime binding (IDs + versions + digests)
+        |                   |                    |
+        v                   v                    v
+GitHub mapper       polling synchronizer     Workflow input
+                                                 |
+                                                 v
+                                      agent execution packages
+```
+
+The Project README and lane descriptions are not configuration storage. Thor may publish an
+informational declaration path, commit, and digest there for discoverability, but must load and
+verify the reviewed Git declaration. Runtime bindings are generated deployment artifacts and contain
+no credentials.
+
+## 3.4 Configuration and Executable Workflow Boundaries
+
+Configuration selects a supported deterministic Workflow implementation and supplies its validated
+profile. It may vary board vocabulary and granularity, entry states, approval transition mappings,
+reviewer sets, phase routing, agent profiles, and skill-selection rules. It must not inject
+arbitrary executable Workflow code.
+
+A materially new process graph requires checked-in deterministic TypeScript, replay tests, a new
+implementation identifier, and an explicit migration strategy. A running Workflow pins the resolved
+declaration and profile versions and digest in its start input. Later Git changes apply to new
+Workflows by default; changing an active execution requires an explicit versioned migration or
+Update policy.
 
 ---
 
@@ -228,8 +307,11 @@ The primary board should use the following lifecycle states:
 15. **Cancelled**  
     Work was intentionally terminated and should not continue.
 
-Not every team needs every column visible in every saved view. The underlying status vocabulary can
-be richer than the default Kanban board.
+This is the detailed default profile, not a required physical vocabulary. A Project may use renamed
+or fewer visible states. Its declaration gives each option a stable semantic key and projects every
+internal Temporal status onto that key. Multiple internal phases may intentionally share one visible
+state; for example, `In Progress` and `Ready for Review` can both project to `Doing`. Human
+approval, block, cancel, and entry transitions remain explicit even in a compact projection.
 
 ---
 
@@ -281,9 +363,36 @@ be richer than the default Kanban board.
 
 These fields allow the orchestrator to route work without embedding policy in issue text or labels.
 
+Physical field and option names are presentation. Thor reads and writes them through compiled
+node-ID bindings. A configured required field with no value is invalid ticket data; it must not
+silently fall back to an autonomous or agent-enabled policy. When a field is intentionally omitted
+or optional, the declaration supplies the explicit normalized default.
+
+## 4.3 Project Provisioning and Drift
+
+Operational tooling provides four idempotent boundaries:
+
+```text
+thor project plan      discover and classify create/update/conflict operations
+thor project apply     apply approved additive or explicitly authorized changes
+thor project validate  compile the live Project into a runtime binding or fail with exact drift
+thor project adopt     validate an exact-title Project and emit a declaration with its number pinned
+```
+
+Creation requires an unnumbered declaration and uses exact-title find-or-create semantics. After
+GitHub assigns a number, adoption emits a declaration with that stable number pinned. A numbered
+declaration whose Project is absent is a conflict, not permission to create a replacement. Additive
+reconciliation re-reads GitHub after each operation, and a second apply against the same declaration
+is a no-op. Destructive changes such as field-type replacement, option removal, option metadata
+changes, or an ambiguous rename require an explicit migration decision.
+
+Thor manages the declared saved-view name, supported layout, filter, and ordered visible-field
+subset. GitHub view settings not represented by the declaration, including grouping, sorting, and
+roadmap markers, remain manual prerequisites. Thor never reports an unsupported setting as applied.
+
 ---
 
-## 4.3 Saved Views
+## 4.4 Saved Views
 
 Recommended saved views include:
 
@@ -373,6 +482,26 @@ eligible_for_execution =
     AND execution_policy_allows_agent
     AND all_blocking_dependencies_are_complete
 ```
+
+Dependency completion is declared rather than inferred from display labels. The strict default is:
+
+```text
+dependency outside the managed Project
+    = referenced Issue is closed
+
+dependency inside the managed Project
+    = referenced Issue is closed
+      AND its bound lifecycle field is the semantic Done state
+```
+
+A profile may instead use Issue closure alone, or accept either Issue closure or semantic Project
+Done for managed dependencies. Thor re-reads native `blocked by` relationships on every complete
+poll, so reopening a dependency or moving a managed dependency out of Done is a material ticket
+change even when the dependent Project item's own `updatedAt` did not move. By default Thor closes
+the originating issue idempotently after a successful PR merge and after projecting delivery Done;
+profiles that delegate issue closure elsewhere may disable that mutation explicitly. Projecting Done
+first prevents issue-closure automation from removing the item before Thor records its final board
+state.
 
 Parent/child relationships and blocking dependencies are therefore separate concepts:
 
@@ -526,6 +655,17 @@ github-project-item:<graphql-node-id>
 A human-readable repository and issue number may be stored as workflow metadata but should not be
 the sole durable identifier because names can change.
 
+The pinned ticket context also records the stable GitHub Issue node ID. Workflow identity remains
+the Project item node ID, but the synchronizer records Project, Project-item, and Issue IDs in
+Temporal memo. Before starting a Workflow for a re-added Project item, it checks running managed
+Workflows for the same Issue ID. This prevents concurrent automation when a human removes and
+immediately re-adds the same issue.
+
+The Workflow start input also contains the validated runtime delivery profile: declaration name,
+version and digest; Workflow implementation/profile; board projection; configured reviewers; and the
+resolved logical agent profiles. This snapshot is immutable replay input. Deployment-specific GitHub
+node IDs remain in Activities and are not needed for deterministic orchestration.
+
 ## 8.2 No separate lease engine
 
 Temporal Task Queues provide worker assignment. For long-running Activities:
@@ -558,8 +698,18 @@ outside Temporal.
 
 ## 9.1 Project Synchronizer
 
-A small stateless synchronizer observes GitHub Project changes through polling, webhooks, or a
-combination of both.
+A small long-running synchronizer process ensures one deterministic `ProjectSynchronizerWorkflow` is
+running per managed Project. That Workflow owns the polling cadence with durable timers and invokes
+one GitHub scan Activity per cycle. On its first run and on every polling cycle it reconciles the
+complete Project. GitHub Project item `updatedAt` values are only second-granular, so a strict
+timestamp cursor could miss a human change made in the same second as Thor's preceding transition.
+Workflows deterministically ignore stale or identical snapshots. A Workflow awaits each scan before
+scheduling the next cycle, so polls cannot overlap even across synchronizer process restarts.
+
+Webhook ingestion is deliberately deferred until the end of the delivery roadmap. Its deployment
+model and buffering architecture will be decided separately. A future webhook adapter may reuse the
+same Project-state re-read and Temporal dispatch boundary, but webhook ingress is not an initial
+runtime requirement.
 
 Its responsibility is limited to:
 
@@ -567,6 +717,38 @@ Its responsibility is limited to:
 2. identify the corresponding Temporal Workflow;
 3. send a Signal or Update containing the changed state;
 4. let the Workflow decide what to do.
+
+Each complete scan produces explicit per-item observations:
+
+```text
+present(snapshot)       item was read and validated
+unreadable(id, reason)  item exists but could not be mapped safely
+removed(id, reason)     item disappeared or was deleted during the scan
+```
+
+Item reads are isolated so one deleted, draft, malformed, or temporarily unavailable item cannot
+discard valid snapshots later in the same scan. Retryable unreadable observations are debounced for
+the configured number of consecutive polls; non-retryable mapping failures are surfaced immediately.
+A normal item snapshot does not nest every blocker Project and field connection into one GraphQL
+query. Thor pages blocker identities first and reads Project membership and lifecycle state only for
+an actual blocker whose configured completion rule can be affected by Project state. Full-scan item
+reads use bounded concurrency to reduce secondary-rate-limit bursts; explicit primary or
+account-level rate-limit responses remain retryable. Recoverable scan failures use Temporal's native
+Activity Retry Policy with exponential delays starting at one second and capped at five minutes;
+polling continues until recovery. Authentication and invalid-response failures are terminal.
+GitHub-provided retry timing is capped at five minutes and passed to Temporal as the next Activity
+retry delay. Operators must still choose a polling interval that fits the Project size and the
+installation or user account's GitHub API budget. A successful read clears the unreadable condition.
+The Workflow remembers the IDs from the prior complete scan to detect removal and carries that state
+through Continue-as-New. Its initial inventory Activity seeds the set from running managed Workflow
+memo, so an item removed during process downtime is still observed. A failed signal dispatch
+restores tracker state so unreadable and removed observations are retried on a later complete scan.
+
+Octokit uses its maintained retry and throttling plugins for a small number of immediate transport
+retries and GitHub's primary and secondary rate-limit rules. This request-local behavior does not
+replace Temporal retries. Process bootstrap and live-test fixture operations, which execute outside
+Temporal, use a maintained promise retry library with exponential jitter and the same five-minute
+maximum delay.
 
 The synchronizer should not contain orchestration policy.
 
@@ -588,10 +770,23 @@ The system must not blindly overwrite human changes.
 
 `Blocked` and `Cancelled` immediately cancel active agent Activities. An unexpected human status
 transition is treated as a conflict: the Workflow preserves its suspended lifecycle state,
-conditionally surfaces `Blocked`, and waits for another GitHub event. A change to ticket intent,
-acceptance criteria, dependencies, or execution policy also blocks current work and requires a new
-blueprint before resuming. Only the documented approval transitions are interpreted as gate
+conditionally surfaces `Blocked`, and waits for a later synchronization cycle. A change to ticket
+intent, acceptance criteria, dependencies, or execution policy also blocks current work and requires
+a new blueprint before resuming. Only the documented approval transitions are interpreted as gate
 decisions.
+
+These defaults are pinned in the Workflow profile. A Project may instead cancel automation for a
+material ticket edit or unexpected status. Dependency changes may replan, resume the interrupted
+phase after the dependency block is cleared, or cancel. Unreadable items may block after a
+configured consecutive-poll threshold or cancel. Removal defaults to the internal terminal
+`Orphaned` outcome because no Project item remains to update; a profile may classify it as
+`Cancelled` instead. None of these settings permits silent continuation through an unacknowledged
+intervention.
+
+Blocked work resumes only when dependencies are complete and the human-visible Project state matches
+the suspended phase's configured board projection. Moving a blocked item to an unrelated state does
+not implicitly resume it. Ticket comparisons use a canonical execution-intent form, including
+dependency sorting, rather than raw object serialization.
 
 ## 9.3 Agent-initiated Project transitions
 
@@ -604,7 +799,12 @@ Agents may propose status transitions such as:
 
 Before performing material GitHub mutations, the Activity should re-read current GitHub state and
 apply an idempotent or conditional update. If human changes conflict materially, control returns to
-the Workflow for policy resolution.
+the Workflow for policy resolution. Changes to unrelated Project metadata do not invalidate a status
+transition when the lifecycle status and normalized ticket context are unchanged. A transition is
+also successful when a confirming re-read shows that the target was already reached. If the
+confirming read instead observes a valid human gate decision, the Workflow consumes that newer
+authoritative snapshot. Delayed poll echoes of Thor's own visible gate status are compatible with
+the corresponding internal wait state.
 
 ---
 
@@ -656,7 +856,8 @@ Long-running implementation Activities should heartbeat periodically.
 
 ## 11.1 Review fan-out
 
-After implementation, a dedicated Review Orchestrator launches ten focused reviewers in parallel.
+After implementation, a dedicated Review Orchestrator launches the Workflow profile's configured
+focused reviewers in parallel. The default profile launches ten.
 
 A suggested default reviewer set is:
 
@@ -672,7 +873,9 @@ A suggested default reviewer set is:
 10. **Product / specification reviewer** — acceptance criteria, user-visible behavior, blueprint
     compliance.
 
-The set can be changed per repository or ticket type.
+The set is versioned configuration and can be changed per Project profile. Ticket-type-specific
+selection may be added as a validated profile rule; it must be resolved before the review fan-out is
+recorded in Workflow history.
 
 ## 11.2 Structured review findings
 
@@ -938,6 +1141,11 @@ Activities should define explicit retry policies, including:
 - maximum attempts where appropriate;
 - non-retryable error classes.
 
+Polling scan Activities continue retrying recoverable infrastructure failures because a GitHub
+outage must not permanently stop Project discovery. Ticket GitHub Activities use the same durable
+recovery rule. Agent execution remains bounded where repeating an invocation can consume provider
+budget or reproduce non-idempotent work.
+
 ## 17.2 Heartbeats
 
 Long-running Activities such as implementation, complex review, or repository analysis should
@@ -1118,6 +1326,8 @@ DONE
 ```
 
 `BLOCKED` and `CANCELLED` are side states reachable from appropriate points in the lifecycle.
+`ORPHANED` is an internal terminal outcome used when the Project item no longer exists and therefore
+has no human-facing board projection.
 
 ---
 
@@ -1254,7 +1464,8 @@ The implementation should preserve the following invariants:
    A ticket does not enter Ready until its configured planning requirements are satisfied.
 
 6. **Review is multi-perspective and structured.**  
-   Ten focused reviewers produce structured findings that are synthesized centrally.
+   The profile's configured focused reviewers produce structured findings that are synthesized
+   centrally; the default profile uses ten.
 
 7. **Repair remains part of review.**  
    Ordinary review remediation uses Repairing/Re-review instead of resetting the ticket to initial
@@ -1269,6 +1480,11 @@ The implementation should preserve the following invariants:
 10. **Human gates are explicit and durable.**  
     Temporal waits for human decisions without occupying workers or relying on transient process
     state.
+
+11. **Human interventions fail safe and recover explicitly.** Material edits, dependency
+    regressions, unreadable items, removals, and unexpected lifecycle changes cancel active
+    execution and follow the pinned intervention policy; unrelated Project items continue
+    reconciling.
 
 ---
 

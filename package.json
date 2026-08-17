@@ -25,9 +25,12 @@
     "thor": "node --env-file-if-exists=.env --import tsx apps/cli/src/main.ts",
     "predev:worker": "npm run build",
     "predev:synchronizer": "npm run build",
+    "pretest:live:cleanup": "npm run build",
     "prethor": "npm run build",
-    "test": "npm run build && vitest run --exclude tests/integration/**",
+    "test": "npm run build && vitest run --exclude \"tests/integration/**\" --exclude \"tests/live/**\"",
     "test:integration": "npm run build && vitest run tests/integration",
+    "test:live:cleanup": "node --env-file-if-exists=.env.live --import tsx tests/live/cleanup.ts",
+    "test:live:e2e": "npm run build && THOR_LIVE_TESTS=1 node --env-file-if-exists=.env.live node_modules/vitest/vitest.mjs run tests/live/delivery.live.test.ts --testTimeout=600000 --hookTimeout=600000",
     "typecheck": "tsc -b --pretty false"
   },
   "devDependencies": {
@@ -39,6 +42,7 @@
     "tsx": "4.23.12",
     "typescript": "6.0.3",
     "typescript-eslint": "8.67.0",
-    "vitest": "4.1.10"
+    "vitest": "4.1.10",
+    "zod": "4.4.3"
   }
 }

@@ -11,8 +11,8 @@ procedures are in [docs/operations.md](docs/operations.md).
 ## What is implemented
 
 - Strict TypeScript on Node.js 22 and Temporal TypeScript SDK 1.22.
-- Deterministic ticket Workflow with explicit retries, durable waits, cancellation, and ten-way
-  review fan-out.
+- Deterministic ticket Workflow with explicit retries, durable waits, cancellation, and configurable
+  review fan-out (ten reviewers in the detailed default profile).
 - Native Claude Agent SDK and Codex SDK adapters behind one provider-neutral interface.
 - A unique prompt, `AGENTS.md`, built-in phase skills, and execution configuration for Claude and
   Codex.
@@ -20,12 +20,18 @@ procedures are in [docs/operations.md](docs/operations.md).
   regression testing.
 - Content-digest audit records for prompts, instructions, configuration, skills, and complete
   execution packages.
-- Idempotent, durable GitHub blueprint artifacts and configurable Project-field inheritance for
-  deferred findings.
+- Checked-in, versioned `DeliveryProject` declarations with strict validation, semantic field and
+  option mappings, saved views, board projections, repository branches, reviewers, agent profiles,
+  and skill selectors.
+- Idempotent Project `plan`, `apply`, `validate`, and `adopt` operations plus startup compilation of
+  live GitHub node IDs into one immutable runtime binding.
+- Idempotent, durable GitHub blueprint artifacts and declaration-derived Project-field inheritance
+  for deferred findings.
 - GitHub Project reads and conditional transitions, idempotent branches, pull requests, comments,
   deferred issues, and merges.
-- A signed-webhook and polling synchronizer, production worker, operator CLI, local Temporal Compose
-  service, fakes, replay tests, and an isolated Git worktree integration test.
+- A durable Temporal polling synchronizer, production worker, operator CLI, local Temporal Compose
+  service, fakes, replay tests, an isolated Git worktree integration test, and an opt-in live
+  GitHub + Temporal system suite.
 
 GitHub remains authoritative for planning and human-facing delivery state. Temporal remains
 authoritative for execution, retries, timers, cancellation, and fan-out. All network, filesystem,
@@ -47,10 +53,26 @@ Install the exact dependency graph and create local configuration:
 npm ci
 npm run build
 cp .env.example .env
+cp config/templates/default-delivery.json config/delivery-project.json
 ```
 
-Fill in the GitHub Project node ID, Status field ID, every Status option ID, webhook secret, and
-authentication values in `.env`. Place working repository clones at:
+Customize `config/delivery-project.json` for the target owner, repository, Project, board, workflow,
+and agent profiles. Set GitHub authentication in `.env`; Thor discovers node IDs from the live
+Project. Preview and apply the declaration, then validate the exact runtime contract:
+
+```bash
+npm run thor -- project plan
+npm run thor -- project apply
+npm run thor -- project validate
+```
+
+To create a Project, omit `github.projectNumber` before `project apply`. Creation is selected by an
+exact, unique title until GitHub assigns a number; use `project adopt` to emit a declaration with
+that number pinned and check the adopted declaration back into Git. Existing extra fields, options,
+views, and item values are preserved. Destructive field-type, rename, option-metadata, or removal
+changes fail as explicit migration conflicts.
+
+Place working repository clones at:
 
 ```text
 repositories/<owner>/<repository>
@@ -67,9 +89,10 @@ npm run dev:worker
 npm run dev:synchronizer
 ```
 
-The Temporal UI is available at <http://localhost:8233>. Configure the GitHub App webhook for
-`projects_v2_item` deliveries at `POST /webhooks/github`; `GET /healthz` is the synchronizer health
-endpoint. Polling remains enabled as a recovery path for missed webhook deliveries.
+The Temporal UI is available at <http://localhost:8233>. Both services validate the declaration
+against the live Project at startup. The synchronizer performs a complete Project item
+reconciliation at startup and each `THOR_POLL_INTERVAL_MS`; it does not mutate Project structure.
+Webhook ingress is deferred and the synchronizer exposes no HTTP endpoint.
 
 Move an eligible Project item to `Design / Blueprint` or `Ready`. The synchronizer starts or signals
 the deterministic Workflow ID `github-project-item:<project-item-node-id>`.
@@ -92,9 +115,11 @@ The default phase routing is:
 | Synthesis      | Claude  |
 | Repair         | Codex   |
 
-Routing is a Workflow input, and either harness can execute any phase. Harness-specific resources
-live under `resources/harnesses/<harness>/`; custom ticket skills live under
-`resources/skills/custom/`.
+This is the default declaration, not a hard-coded routing table. Each declaration maps logical phase
+roles to named agent profiles, and each profile selects Claude or Codex plus its audited resource
+profile and non-secret configuration. Harness-specific resources live under
+`resources/harnesses/<harness>/`; custom ticket skills live under `resources/skills/custom/` and are
+selected from ticket and blueprint context.
 
 Read-only phases force read-only/plan permissions. Implementation and repair run in an isolated Git
 worktree. Thor—not the model—owns commits, pushes, pull-request creation, deferred-issue creation,
@@ -111,9 +136,18 @@ pre-approved. In GitHub, move:
 - `Awaiting Human Merge Review` to `Ready to Merge` to approve, or `Repairing` to request changes;
 - any active item to `Blocked` or `Cancelled` to stop current agent work.
 
+Material ticket edits, dependency changes, unreadable items, unexpected status changes, and item
+removal follow the checked-in `workflow.interventions` policy. The default replans material edits,
+requires a blocked item to return to its suspended board phase before resuming, and records a
+removed item as internal `Orphaned` without attempting to recreate it.
+
 The CLI is useful for local operations and diagnostics:
 
 ```bash
+npm run thor -- project plan
+npm run thor -- project apply
+npm run thor -- project validate
+npm run thor -- project adopt
 npm run thor -- start <project-item-id>
 npm run thor -- status <project-item-id>
 npm run thor -- approve-blueprint <project-item-id> <actor>
@@ -130,15 +164,18 @@ record.
 
 ```text
 apps/worker          Temporal worker and concrete Activity wiring
-apps/synchronizer    GitHub webhook/poll bridge
+apps/synchronizer    Worker for the per-Project polling Workflow and its Activities
 apps/cli             Operator commands
+config/templates     Detailed and compact DeliveryProject declarations
 packages/domain      Domain schemas and deterministic state machine
+packages/config      Declaration schemas, compiler, bindings, and Project planner
 packages/agent       Claude/Codex adapters and execution-package builder
-packages/github      GitHub gateway, webhook validation, and fake
+packages/github      GitHub delivery/control-plane gateways, reserved webhook helpers, and fakes
 packages/workflows   Temporal Workflow, Activities, and Git workspaces
 packages/runtime     Validated runtime configuration and connections
 resources/           Versioned prompts, AGENTS.md files, and skills
 tests/integration    Real Temporal Activity + isolated Git integration
+tests/live           Opt-in real GitHub + Temporal system validation
 ```
 
 ## Validation
@@ -151,6 +188,19 @@ npm test
 npm run test:integration
 ```
 
-The automated suite does not require live Claude, Codex, GitHub, or Temporal Cloud credentials. Live
-provider and GitHub behavior must be verified in an authorized test Project before production
-rollout.
+The standard automated suite does not require live Claude, Codex, GitHub, or Temporal Cloud
+credentials. To run the separately gated system suite, copy `.env.live.example` to `.env.live`,
+point it at a private disposable repository and Project, authenticate `gh`, and run:
+
+```bash
+npm run test:live:e2e
+```
+
+That command starts a real local Temporal server, the real polling synchronizer and worker, and uses
+the real GitHub APIs with deterministic scripted Claude/Codex-shaped harnesses. It covers autonomous
+delivery, both approval gates, repair/re-review with deferred work, cancellation, and replacement-
+worker recovery. It also defines real Project scenarios for Blocked-to-resumed delivery and active
+item removal/orphaning. Successful fixtures are cleaned by default; `.thor-live-runs/` retains
+manifests for audit and exact cleanup. Rerun cleanup for a retained failure with
+`npm run test:live:cleanup -- .thor-live-runs/<run-id>.json`. Paid provider SDK behavior remains a
+separate future live suite.

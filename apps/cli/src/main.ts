@@ -2,7 +2,15 @@
 
 import { Client } from "@temporalio/client";
 import { projectItemIdSchema, redactKnownSecrets, workflowIdFor } from "@thor/domain";
-import { createClientConnection, loadTemporalConfiguration } from "@thor/runtime";
+import {
+  baseBranchFor,
+  createClientConnection,
+  createGitHubGateway,
+  createProjectConfigurationManager,
+  loadProjectControlConfiguration,
+  loadRuntimeConfiguration,
+  loadTemporalConfiguration,
+} from "@thor/runtime";
 import {
   blueprintDecisionSignal,
   cancelTicketSignal,
@@ -18,6 +26,10 @@ async function main(): Promise<void> {
     rawActor = process.env.USER ?? "thor-operator",
     ...reasonParts
   ] = process.argv.slice(2);
+  if (command === "project") {
+    await runProjectCommand(rawProjectItemId);
+    return;
+  }
   if (command === undefined || rawProjectItemId === undefined) {
     throw new UsageError(usage());
   }
@@ -25,7 +37,8 @@ async function main(): Promise<void> {
   const actor = redactKnownSecrets(rawActor);
   const rawReason = reasonParts.join(" ").trim();
   const reason = rawReason.length === 0 ? undefined : redactKnownSecrets(rawReason);
-  const temporal = loadTemporalConfiguration();
+  const runtime = command === "start" ? await loadRuntimeConfiguration() : undefined;
+  const temporal = runtime?.temporal ?? loadTemporalConfiguration();
   const connection = await createClientConnection({ temporal });
   try {
     const client = new Client({ connection, namespace: temporal.namespace });
@@ -33,12 +46,20 @@ async function main(): Promise<void> {
     const handle = client.workflow.getHandle<typeof ticketWorkflow>(workflowId);
     switch (command) {
       case "start": {
+        if (runtime === undefined) throw new Error("start requires runtime configuration");
+        const snapshot = await createGitHubGateway(runtime).getProjectItem(projectItemId);
         const started = await client.workflow.start(ticketWorkflow, {
           workflowId,
           workflowIdConflictPolicy: "USE_EXISTING",
           workflowIdReusePolicy: "REJECT_DUPLICATE",
           taskQueue: temporal.taskQueue,
-          args: [{ projectItemId, baseBranch: process.env.THOR_BASE_BRANCH ?? "main" }],
+          args: [
+            {
+              projectItemId,
+              baseBranch: baseBranchFor(runtime.binding, snapshot.ticket.repository),
+              delivery: runtime.binding.delivery,
+            },
+          ],
         });
         writeJson({
           workflowId: started.workflowId,
@@ -96,6 +117,28 @@ async function main(): Promise<void> {
   }
 }
 
+async function runProjectCommand(command: string | undefined): Promise<void> {
+  if (command === undefined || !["plan", "apply", "validate", "adopt"].includes(command)) {
+    throw new UsageError(usage());
+  }
+  const configuration = await loadProjectControlConfiguration();
+  const manager = createProjectConfigurationManager(configuration);
+  switch (command) {
+    case "plan":
+      writeJson(await manager.plan(configuration.declaration));
+      return;
+    case "apply":
+      writeJson(await manager.apply(configuration.declaration));
+      return;
+    case "validate":
+      writeJson(await manager.validate(configuration.declaration));
+      return;
+    case "adopt":
+      writeJson(await manager.adopt(configuration.declaration));
+      return;
+  }
+}
+
 function writeJson(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
@@ -103,6 +146,7 @@ function writeJson(value: unknown): void {
 function usage(): string {
   return [
     "Usage: thor <command> <project-item-id> [actor] [reason...]",
+    "       thor project <plan|apply|validate|adopt>",
     "",
     "Commands:",
     "  start",
@@ -112,6 +156,10 @@ function usage(): string {
     "  approve-merge",
     "  request-merge-changes",
     "  cancel",
+    "  project plan",
+    "  project apply",
+    "  project validate",
+    "  project adopt",
   ].join("\n");
 }
 

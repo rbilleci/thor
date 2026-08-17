@@ -8,34 +8,46 @@ deployment. The lifecycle invariants remain defined by [design.md](design.md).
 Thor has two long-running processes:
 
 - `@thor/worker` polls the configured Temporal Task Queue and executes Workflows and Activities.
-- `@thor/synchronizer` verifies GitHub webhooks, polls for missed changes, and sends Temporal
-  Signals. It contains no lifecycle policy.
+- `@thor/synchronizer` polls GitHub Project changes and sends Temporal Signals. It contains no
+  lifecycle policy.
 
 The CLI is an on-demand Temporal client. The worker and synchronizer may be replicated; Temporal
 coordinates execution, and GitHub mutations use conditional or find-or-create behavior.
 
 ## GitHub configuration
 
-Create the Status options listed in the design and record their GraphQL node IDs in
-`GITHUB_STATUS_OPTIONS_JSON`. Every Thor status is required so a missing mapping fails at startup
-instead of halfway through a ticket.
+Set `THOR_PROJECT_DECLARATION` to a checked-in strict JSON `DeliveryProject` document. Two reference
+profiles live under `config/templates/`: the detailed Thor lifecycle and a compact board with
+renamed fields/options, fewer visible states, alternate reviewers, swapped Claude/Codex routing, and
+a different base branch.
 
-Configure `GITHUB_DEFERRED_FIELDS_JSON` when deferred issues should inherit Project metadata. Each
-single-select route contains a `fieldId` and an `options` map keyed by Thor's normalized value;
-`component` is a text field. For example:
+The declaration is the automation contract. GitHub remains authoritative for ticket values and human
+decisions. Thor discovers the live Project, resolves semantic fields and options to GraphQL node
+IDs, validates saved views and repository associations, and compiles an immutable runtime binding.
+Required policy values fail closed; optional or intentionally absent fields use the declaration's
+explicit defaults. Deferred issues inherit only fields present in that same binding, so there is no
+second field-ID configuration.
 
-```json
-{
-  "type": { "fieldId": "PVTSSF_TYPE", "options": { "feature": "OPT_FEATURE", "bug": "OPT_BUG" } },
-  "priority": { "fieldId": "PVTSSF_PRIORITY", "options": { "P1": "OPT_P1", "P2": "OPT_P2" } },
-  "component": { "fieldId": "PVTF_COMPONENT" },
-  "agentPolicy": { "fieldId": "PVTSSF_AGENT", "options": { "preferred": "OPT_PREFERRED" } },
-  "planningDepth": { "fieldId": "PVTSSF_PLAN", "options": { "full": "OPT_FULL" } },
-  "severity": { "fieldId": "PVTSSF_SEVERITY", "options": { "high": "OPT_HIGH" } }
-}
+Before starting services, run:
+
+```bash
+npm run thor -- project plan
+npm run thor -- project apply
+npm run thor -- project validate
 ```
 
-Routes are optional; unmapped values are left unset rather than guessed.
+`plan` is read-only. `apply` supports Project creation, metadata updates, missing fields, additive
+select options, repository links, and the supported saved-view layout/filter/visible-field subset.
+It preserves existing option IDs and extra unmanaged Project content. Field type changes, case-only
+renames, removal or replacement of existing options, and existing option metadata changes are
+conflicts requiring an explicit migration.
+
+For a new Project, omit `github.projectNumber`; Thor finds or creates by exact unique title. After
+GitHub assigns the number, `project adopt` emits a validated declaration with the number pinned.
+Check that declaration into the protected configuration source. If a numbered Project does not
+exist, Thor fails rather than creating a different Project accidentally. View grouping, sorting,
+roadmap markers, and other settings not represented in the schema remain manual prerequisites and
+are never reported as applied.
 
 For local development, `GITHUB_TOKEN` is sufficient. Production should use a GitHub App. The current
 combined worker needs:
@@ -50,9 +62,8 @@ Thor pins REST requests to GitHub API version `2026-03-10` rather than relying o
 deprecated unversioned default. Set `GITHUB_API_VERSION` explicitly when a GitHub Enterprise Server
 deployment supports a different API version.
 
-Subscribe the App webhook to Projects v2 item changes. Use a high-entropy webhook secret of at least
-16 characters. Put the App private key in a filesystem secret and configure its path; do not place
-the private-key contents in `.env`.
+Webhook delivery is deferred and does not need to be configured. Put the App private key in a
+filesystem secret and configure its path; do not place the private-key contents in `.env`.
 
 Repository clones must exist at `THOR_SOURCE_ROOT/<owner>/<repository>`. Configure a credential
 helper, SSH remote, or other non-interactive Git authentication for `origin`. Never embed tokens in
@@ -98,19 +109,24 @@ npm run dev:synchronizer
 ```
 
 In a built deployment use each workspace package's `start` command. Both processes emit structured
-JSON lifecycle logs. Correlate operations with Project item ID, Workflow ID, pull-request number,
-review-run ID, and execution ID. Prompt and skill contents are deliberately absent from logs and
-Workflow results; audit records contain only versions and SHA-256 digests.
+JSON lifecycle logs. Each process validates the live Project and compiles the same declaration
+before connecting delivery behavior to it; structural drift prevents startup. Correlate operations
+with Project item ID, Workflow ID, pull-request number, review-run ID, and execution ID. Prompt and
+skill contents are deliberately absent from logs and Workflow results; audit records contain only
+versions and SHA-256 digests.
 
-The synchronizer listens on `THOR_SYNCHRONIZER_HOST:THOR_SYNCHRONIZER_PORT`. Expose only the webhook
-route through TLS in production. It rejects invalid signatures before parsing JSON and limits
-request bodies to 1 MiB.
-
-On startup the synchronizer performs a full Project reconciliation, then advances a high-water
-timestamp only after every item in a poll batch has been dispatched. A failed batch is retried from
-the prior cursor, so downtime and partial polling failures do not create a silent event gap.
+On startup and every later tick, the synchronizer performs a full Project reconciliation. This
+avoids a missed-change window caused by GitHub's second-granular Project item timestamps. Workflows
+ignore identical and stale snapshots, while material ticket or lifecycle changes remain
+authoritative. Poll ticks do not overlap within a process; a failed scan is retried in full on the
+next tick. Set `THOR_POLL_INTERVAL_MS` to at least 5000; the default is 30000. The synchronizer
+exposes no inbound HTTP listener.
 
 ## Normal human controls
+
+The state names below describe the detailed reference profile. Compact or team-specific declarations
+can use different physical labels; the compiled semantic projection and approval transitions
+preserve the same Workflow invariants.
 
 GitHub status changes are authoritative:
 
@@ -127,9 +143,33 @@ Approvals arriving before their gate is active are ignored. This prevents approv
 artifact. Reapply the intended GitHub transition after the gate becomes visible.
 
 An unexpected status transition or an edit to ticket intent, acceptance criteria, dependencies, or
-execution policy cancels active work and moves the item to `Blocked` conditionally. After resolving
-the conflict, move the item out of `Blocked`; Thor restores the suspended lifecycle state, and
-ticket-context changes restart at `Design / Blueprint`.
+execution policy cancels active work and follows the declaration's `workflow.interventions` policy.
+The detailed default moves the item to `Blocked` and replans. After resolving the conflict, move the
+item to the board state projected for the suspended phase; Thor resumes only when that state matches
+and all blocking dependencies are complete. The compact template demonstrates the alternative
+dependency `resume` policy.
+
+`workflow.dependencies.completion` declares whether blockers complete on Issue closure, semantic
+Project `Done`, or both. The detailed default requires a managed dependency to be both closed and
+Done, while an external dependency completes on Issue closure. `closeIssueAfterMerge` defaults to
+true so downstream dependencies normally receive both completion signals. Thor projects the source
+item to semantic Done before closing its Issue, avoiding a race with GitHub automation that removes
+closed Issues from the Project.
+
+Repeated unreadable-item polls block or cancel according to policy without stopping reconciliation
+of other items. Project-item removal ends the default Workflow as internal `Orphaned`; no board
+transition is attempted because the target item no longer exists. Running Workflow memo lets a
+restarted synchronizer detect removal that happened during downtime and prevents a re-added issue
+from starting concurrently with its prior Workflow.
+
+Set `THOR_POLL_INTERVAL_MS` with the live Project size and the authenticating account's GitHub API
+budget in mind; the default is 30 seconds and the enforced minimum is 5 seconds. Snapshot reads are
+isolated and issued in batches of at most four. Dependency Project membership and lifecycle fields
+are queried separately only when a real blocker and the declaration's completion rule require them,
+avoiding the high GraphQL cost of a worst-case nested blocker query. GitHub primary, secondary, and
+account-level rate-limit responses are retryable infrastructure failures, not authentication
+failures. The scale suite in the live-test roadmap still owns measurement of a formal operating
+envelope for large Projects.
 
 Risk flags or failed tests dynamically add a pre-merge human gate even for an initially autonomous
 ticket. Approval does not override failed tests: the deterministic merge gate still requires tests
@@ -137,7 +177,17 @@ to pass.
 
 ## Recovery and retries
 
-- Retryable provider, network, GitHub, and Git failures use bounded Activity retries with backoff.
+- Project polling is a durable per-Project Temporal Workflow. Each scan is an Activity; recoverable
+  failures retry indefinitely with exponential backoff from one second to a five-minute cap.
+- Ticket GitHub Activities also continue across recoverable outages with a five-minute retry cap.
+  Agent and workspace retries remain bounded where repeated execution can consume provider budget.
+- GitHub's official Octokit retry and throttling plugins absorb a small number of immediate
+  transport failures and apply GitHub primary/secondary-limit guidance. Temporal remains the
+  authoritative durable retry scheduler.
+- GitHub `Retry-After` and exhausted `X-RateLimit-Reset` timing is propagated to Temporal and capped
+  at five minutes. Ordinary rate-budget headers do not turn authentication failures into retries.
+- Worker and synchronizer configuration bootstrap, plus live-test setup and cleanup outside
+  Temporal, use exponential jitter with a five-minute maximum delay.
 - Authentication, invalid structured output, policy conflicts, and invalid execution packages are
   terminal Activity errors.
 - Agent Activities heartbeat every 30 seconds; the worker caps heartbeat throttling at 10 seconds so
@@ -156,7 +206,7 @@ reset Workflow history merely to bypass a gate.
 ## Production rollout checklist
 
 1. Run the full validation suite.
-2. Test GitHub field mappings and App permissions in a non-production Project.
+2. Run `project plan` and `project validate`, and review any live Project drift.
 3. Test one Claude and one Codex execution using non-sensitive fixture tickets.
 4. Verify repository credential helpers can fetch and push without prompts.
 5. Exercise Blocked, Cancelled, both approval gates, retry, and worker-restart behavior.
@@ -164,5 +214,7 @@ reset Workflow history merely to bypass a gate.
 7. Confirm logs and Temporal payloads contain no secrets or full prompt content.
 8. Back up or retain Temporal according to the organization's recovery requirements.
 
-The repository integration suite verifies local Temporal and Git behavior with fakes. It does not
-claim that live GitHub, Claude, Codex, or Temporal Cloud configuration has been verified.
+The repository integration suite verifies local Temporal and Git behavior with fakes. The separately
+gated `npm run test:live:e2e` suite verifies real GitHub plus a real local Temporal server with
+scripted harnesses. It does not verify paid Claude/Codex calls, GitHub App authentication, or
+Temporal Cloud.

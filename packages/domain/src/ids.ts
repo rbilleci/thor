@@ -4,6 +4,7 @@ export declare const brand: unique symbol;
 export type Brand<Value, Name extends string> = Value & { readonly [brand]: Name };
 
 export type ProjectItemId = Brand<string, "ProjectItemId">;
+export type IssueId = Brand<string, "IssueId">;
 export type WorkflowId = Brand<string, "WorkflowId">;
 export type ReviewRunId = Brand<string, "ReviewRunId">;
 export type FindingId = Brand<string, "FindingId">;
@@ -18,6 +19,7 @@ const identifier = <Name extends string>(name: Name) =>
     .transform((value) => value as Brand<string, Name>);
 
 export const projectItemIdSchema = identifier("ProjectItemId");
+export const issueIdSchema = identifier("IssueId");
 export const workflowIdSchema = identifier("WorkflowId");
 export const reviewRunIdSchema = identifier("ReviewRunId");
 export const findingIdSchema = identifier("FindingId");

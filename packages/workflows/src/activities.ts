@@ -20,6 +20,7 @@ import {
   reviewerKinds,
   reviewerResultSchema,
   reviewSynthesisSchema,
+  ticketContextsEqual,
   type ExecutionPackage,
   type FindingId,
   type NormalizedFinding,
@@ -33,6 +34,7 @@ import {
   implementationAgentOutputSchema,
   repairAgentOutputSchema,
   stableFindingInputSchema,
+  type AgentActivityContext,
   type Audited,
   type BlueprintActivityInput,
   type ExecutionAuditRecord,
@@ -104,6 +106,13 @@ export function createTicketActivities(dependencies: TicketActivityDependencies)
       } catch (error) {
         if (error instanceof GitHubError && error.code === "conflict") {
           const snapshot = await dependencies.github.getProjectItem(transition.projectItemId);
+          if (
+            snapshot.status === transition.targetStatus &&
+            transition.expectedTicket !== undefined &&
+            ticketContextsEqual(snapshot.ticket, transition.expectedTicket)
+          ) {
+            return { kind: "updated", snapshot };
+          }
           return { kind: "conflict", snapshot, reason: error.message };
         }
         throw toApplicationFailure(error);
@@ -426,15 +435,26 @@ export function createTicketActivities(dependencies: TicketActivityDependencies)
       );
     },
 
-    async publishRunSummary(input) {
+    async closeSourceIssue(input) {
       await withActivityFailure(() =>
-        dependencies.github.upsertComment({
+        dependencies.github.closeIssue(input.ticket.repository, input.ticket.issueNumber),
+      );
+    },
+
+    async publishRunSummary(input) {
+      try {
+        await dependencies.github.upsertComment({
           repository: input.ticket.repository,
           issueNumber: input.ticket.issueNumber,
           idempotencyKey: `${input.run.workflowId}:final-summary`,
           body: runSummary(input),
-        }),
-      );
+        });
+      } catch (error) {
+        // A deleted source Issue has no place to receive the ancillary final summary. The durable
+        // Workflow outcome must still complete; all other GitHub failures retain normal retries.
+        if (error instanceof GitHubError && error.code === "not_found") return;
+        throw toApplicationFailure(error);
+      }
     },
   };
 }
@@ -460,10 +480,11 @@ async function executeAgent<Output>(
 ): Promise<Audited<Output>> {
   const executionPackage = await dependencies.packageBuilder.build({
     executionId: input.executionId,
-    harness: input.harness,
+    agent: input.agent,
     purpose,
     ticket: input.ticket,
     payload,
+    skillSelectors: input.skillSelectors,
   });
   heartbeat({ phase: "agent_started", executionId: input.executionId, purpose: purpose.kind });
   const heartbeatTimer = setInterval(() => {
@@ -479,7 +500,7 @@ async function executeAgent<Output>(
       signal,
     );
     const value = outputSchema.parse(redactStructuredSecrets(result.structuredOutput));
-    return { value, audit: auditRecord(result, purpose.kind, executionPackage) };
+    return { value, audit: auditRecord(result, purpose.kind, executionPackage, input) };
   } finally {
     clearInterval(heartbeatTimer);
   }
@@ -493,9 +514,14 @@ function auditRecord(
   result: AgentExecutionResult,
   purpose: string,
   executionPackage: ExecutionPackage,
+  input: AgentActivityContext,
 ): ExecutionAuditRecord {
   return {
     executionId: result.executionId,
+    declarationDigest: input.declarationDigest,
+    workflowProfile: input.workflowProfile,
+    agentProfile: executionPackage.agentProfile,
+    agentProfileDigest: executionPackage.agentProfileDigest,
     harness: result.harness,
     purpose,
     packageDigest: result.packageDigest,
@@ -619,7 +645,7 @@ async function withActivityFailure<Value>(operation: () => Promise<Value>): Prom
   }
 }
 
-function toApplicationFailure(error: unknown): Error {
+export function toApplicationFailure(error: unknown): Error {
   if (error instanceof ApplicationFailure) return error;
   if (error instanceof AgentExecutionError) {
     if (error.code === "cancelled") {
@@ -636,6 +662,7 @@ function toApplicationFailure(error: unknown): Error {
       message: redactKnownSecrets(error.message),
       type: `github_${error.code}`,
       nonRetryable: !error.retryable,
+      ...(error.retryAfterMs === undefined ? {} : { nextRetryDelay: error.retryAfterMs }),
     });
   }
   if (error instanceof PackageBuildError) {

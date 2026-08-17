@@ -9,6 +9,8 @@
   },
   "dependencies": {
     "@temporalio/client": "1.22.0",
+    "@temporalio/worker": "1.22.0",
+    "@thor/config": "0.1.0",
     "@thor/domain": "0.1.0",
     "@thor/github": "0.1.0",
     "@thor/runtime": "0.1.0",

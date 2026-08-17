@@ -1,25 +1,29 @@
 import {
   findingIdSchema,
+  issueIdSchema,
   projectItemIdSchema,
   type NormalizedFinding,
   type TicketContext,
 } from "@thor/domain";
 import { describe, expect, it } from "vitest";
 
-import { mapDeferredProjectFields, type DeferredFieldRouting } from "./config.js";
+import { mapDeferredProjectFields } from "./config.js";
 
 describe("deferred Project field routing", () => {
   it("maps configured ticket and finding metadata without guessing unmapped values", () => {
-    const routing: DeferredFieldRouting = {
-      type: { fieldId: "field-type", options: { bug: "option-bug" } },
-      priority: { fieldId: "field-priority", options: { P1: "option-p1" } },
-      component: { fieldId: "field-component" },
-      agentPolicy: { fieldId: "field-agent", options: { preferred: "option-preferred" } },
-      planningDepth: { fieldId: "field-planning", options: {} },
-      severity: { fieldId: "field-severity", options: { high: "option-high" } },
+    const binding = {
+      fields: {
+        lifecycle: select("field-lifecycle", {}),
+        workType: select("field-type", { bug: "option-bug" }),
+        priority: select("field-priority", { P1: "option-p1" }),
+        component: { type: "text" as const, fieldId: "field-component", requiredOnItems: false },
+        agentPolicy: select("field-agent", { preferred: "option-preferred" }),
+        planningDepth: select("field-planning", {}),
+        severity: select("field-severity", { high: "option-high" }),
+      },
     };
 
-    expect(mapDeferredProjectFields(routing, finding(), ticket())).toEqual([
+    expect(mapDeferredProjectFields(binding, finding(), ticket())).toEqual([
       { fieldId: "field-type", kind: "single_select", optionId: "option-bug" },
       { fieldId: "field-priority", kind: "single_select", optionId: "option-p1" },
       { fieldId: "field-component", kind: "text", text: "payments" },
@@ -29,9 +33,14 @@ describe("deferred Project field routing", () => {
   });
 });
 
+function select(fieldId: string, options: Record<string, string>) {
+  return { type: "single_select" as const, fieldId, requiredOnItems: false, options };
+}
+
 function ticket(): TicketContext {
   return {
     projectItemId: projectItemIdSchema.parse("PVTI_runtime"),
+    issueId: issueIdSchema.parse("I_runtime"),
     repository: { owner: "example", name: "repository" },
     issueNumber: 23,
     title: "Fix payment failure",

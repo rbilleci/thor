@@ -1,6 +1,12 @@
 import path from "node:path";
 
-import { executionIdSchema, projectItemIdSchema, type TicketContext } from "@thor/domain";
+import type { AgentProfileSnapshot, SkillSelector } from "@thor/config/schema";
+import {
+  executionIdSchema,
+  issueIdSchema,
+  projectItemIdSchema,
+  type TicketContext,
+} from "@thor/domain";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -12,10 +18,41 @@ import { assembledUserPrompt } from "./prompt.js";
 import { FakeHarness, HarnessRouter } from "./router.js";
 
 const resources = path.resolve(import.meta.dirname, "../../../resources");
+const skillSelectors: SkillSelector[] = [
+  {
+    skill: "security",
+    reason: "security context",
+    match: { keywords: ["auth", "secure", "security", "secret", "permission"] },
+  },
+  {
+    skill: "data-migration",
+    reason: "data context",
+    match: { keywords: ["database", "schema", "migration", "data"] },
+  },
+  {
+    skill: "api-compatibility",
+    reason: "API context",
+    match: { keywords: ["api", "compatibility", "endpoint", "protocol"] },
+  },
+  {
+    skill: "regression-testing",
+    reason: "regression context",
+    match: { workTypes: ["bug"], keywords: ["test", "regression", "flaky"] },
+  },
+];
+
+function agent(
+  id: string,
+  harness: AgentProfileSnapshot["harness"],
+  configuration: Record<string, string> = {},
+): AgentProfileSnapshot {
+  return { id, harness, resourceProfile: "default", configuration, digest: "a".repeat(64) };
+}
 
 function ticket(): TicketContext {
   return {
     projectItemId: projectItemIdSchema.parse("PVTI_agent"),
+    issueId: issueIdSchema.parse("I_agent"),
     repository: { owner: "example", name: "repo" },
     issueNumber: 7,
     title: "Fix secure API migration regression",
@@ -43,9 +80,10 @@ describe("ExecutionPackageBuilder", () => {
       purpose: { kind: "implementation" as const },
       ticket: ticket(),
       payload: { blueprint: "approved" },
+      skillSelectors,
     };
-    const claude = await builder.build({ ...base, harness: "claude" });
-    const codex = await builder.build({ ...base, harness: "codex" });
+    const claude = await builder.build({ ...base, agent: agent("planner", "claude") });
+    const codex = await builder.build({ ...base, agent: agent("builder", "codex") });
     expect(claude.agentsMd).not.toBe(codex.agentsMd);
     expect(claude.digest).not.toBe(codex.digest);
     expect(claude.promptDigest).toMatch(/^[a-f0-9]{64}$/);
@@ -60,7 +98,9 @@ describe("ExecutionPackageBuilder", () => {
     ]);
     expect(assembledUserPrompt(claude)).toContain(claude.agentsMd);
     expect(assembledUserPrompt(codex)).toContain(codex.agentsMd);
-    expect((await builder.build({ ...base, harness: "claude" })).digest).toBe(claude.digest);
+    expect((await builder.build({ ...base, agent: agent("planner", "claude") })).digest).toBe(
+      claude.digest,
+    );
   });
 
   it("rejects secret-bearing configuration keys", async () => {
@@ -68,11 +108,11 @@ describe("ExecutionPackageBuilder", () => {
     await expect(
       builder.build({
         executionId: executionIdSchema.parse("execution-2"),
-        harness: "codex",
+        agent: agent("unsafe", "codex", { apiKey: "do-not-store" }),
         purpose: { kind: "blueprint" },
         ticket: ticket(),
         payload: {},
-        configuration: { apiKey: "do-not-store" },
+        skillSelectors,
       }),
     ).rejects.toMatchObject({ code: "secret_configuration" } satisfies Partial<PackageBuildError>);
   });
@@ -89,13 +129,14 @@ describe("ExecutionPackageBuilder", () => {
     };
     const executionPackage = await builder.build({
       executionId: executionIdSchema.parse("execution-context-skills"),
-      harness: "codex",
+      agent: agent("builder", "codex"),
       purpose: { kind: "implementation" },
       ticket: contextTicket,
       payload: {
         blueprint: { affectedAreas: ["database schema"] },
         riskFlags: ["security_sensitive"],
       },
+      skillSelectors,
     });
 
     expect(executionPackage.skills.map((skill) => skill.name)).toEqual([
@@ -119,10 +160,11 @@ describe("HarnessRouter", () => {
     const builder = new ExecutionPackageBuilder(resources);
     const executionPackage = await builder.build({
       executionId: executionIdSchema.parse("execution-router"),
-      harness: "codex",
+      agent: agent("builder", "codex"),
       purpose: { kind: "blueprint" },
       ticket: ticket(),
       payload: {},
+      skillSelectors,
     });
     const fake = new FakeHarness("codex", {
       finalResponse: "done",
@@ -143,10 +185,11 @@ describe("HarnessRouter", () => {
     const builder = new ExecutionPackageBuilder(resources);
     const executionPackage = await builder.build({
       executionId: executionIdSchema.parse("execution-correlation"),
-      harness: "codex",
+      agent: agent("builder", "codex"),
       purpose: { kind: "blueprint" },
       ticket: ticket(),
       payload: {},
+      skillSelectors,
     });
     const router = new HarnessRouter();
     router.register({

@@ -2,12 +2,12 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
+import type { AgentProfileSnapshot, SkillSelector } from "@thor/config/schema";
 import {
   executionPackageSchema,
   type ExecutionId,
   type ExecutionPackage,
   type ExecutionPurpose,
-  type HarnessKind,
   type SkillRef,
   type TicketContext,
   redactKnownSecrets,
@@ -16,11 +16,11 @@ import { z } from "zod";
 
 export type PackageBuildRequest = {
   executionId: ExecutionId;
-  harness: HarnessKind;
+  agent: AgentProfileSnapshot;
   purpose: ExecutionPurpose;
   ticket: TicketContext;
   payload: unknown;
-  configuration?: Readonly<Record<string, string>>;
+  skillSelectors: readonly SkillSelector[];
 };
 
 export class PackageBuildError extends Error {
@@ -43,8 +43,8 @@ export class ExecutionPackageBuilder {
   public constructor(private readonly resourceRoot: string) {}
 
   public async build(request: PackageBuildRequest): Promise<ExecutionPackage> {
-    validateConfiguration(request.configuration ?? {});
-    const harnessRoot = path.join(this.resourceRoot, "harnesses", request.harness);
+    validateConfiguration(request.agent.configuration);
+    const harnessRoot = agentResourceRoot(this.resourceRoot, request.agent);
     const [basePrompt, agentsMd, defaultConfiguration] = await Promise.all([
       readRequired(path.join(harnessRoot, "base-prompt.md")),
       readRequired(path.join(harnessRoot, "AGENTS.md")),
@@ -52,16 +52,22 @@ export class ExecutionPackageBuilder {
     ]);
     const configuration = {
       ...defaultConfiguration,
-      ...(request.configuration ?? {}),
+      ...request.agent.configuration,
     };
     validateConfiguration(configuration);
 
     const selected = [
       {
         path: path.join(harnessRoot, "skills", purposeSkill(request.purpose), "SKILL.md"),
-        reason: `built-in ${request.harness} skill for ${request.purpose.kind}`,
+        reason: `built-in ${request.agent.harness} skill for ${request.purpose.kind}`,
       },
-      ...selectCustomSkills(this.resourceRoot, request.ticket, request.payload),
+      ...selectCustomSkills(
+        this.resourceRoot,
+        request.ticket,
+        request.payload,
+        request.purpose,
+        request.skillSelectors,
+      ),
     ];
     const skills = await Promise.all(
       selected.map(async ({ path: skillPath, reason }) => {
@@ -94,7 +100,9 @@ export class ExecutionPackageBuilder {
     const agentsMdDigest = sha256(redactedAgentsMd);
     const configurationDigest = sha256(stableConfiguration(configuration));
     const digest = executionPackageDigest({
-      harness: request.harness,
+      agentProfile: request.agent.id,
+      agentProfileDigest: request.agent.digest,
+      harness: request.agent.harness,
       purpose: request.purpose,
       prompt,
       promptDigest,
@@ -106,7 +114,9 @@ export class ExecutionPackageBuilder {
     });
     return executionPackageSchema.parse({
       executionId: request.executionId,
-      harness: request.harness,
+      agentProfile: request.agent.id,
+      agentProfileDigest: request.agent.digest,
+      harness: request.agent.harness,
       purpose: request.purpose,
       prompt,
       promptDigest,
@@ -135,40 +145,66 @@ function selectCustomSkills(
   root: string,
   ticket: TicketContext,
   payload: unknown,
+  purpose: ExecutionPurpose,
+  selectors: readonly SkillSelector[],
 ): { path: string; reason: string }[] {
-  const searchable =
-    `${ticket.title} ${ticket.body} ${ticket.component ?? ""} ${JSON.stringify(payload)}`.toLowerCase();
   const custom = path.join(root, "skills", "custom");
-  const selected: { path: string; reason: string }[] = [];
-  if (containsAny(searchable, ["auth", "secure", "security", "secret", "permission"])) {
-    selected.push({
-      path: path.join(custom, "security", "SKILL.md"),
-      reason: "ticket or phase context indicates security-sensitive work",
-    });
-  }
-  if (containsAny(searchable, ["database", "schema", "migration", "data"])) {
-    selected.push({
-      path: path.join(custom, "data-migration", "SKILL.md"),
-      reason: "ticket or phase context indicates data or migration work",
-    });
-  }
-  if (containsAny(searchable, ["api", "compatibility", "endpoint", "protocol"])) {
-    selected.push({
-      path: path.join(custom, "api-compatibility", "SKILL.md"),
-      reason: "ticket or phase context indicates API or compatibility work",
-    });
-  }
-  if (ticket.workType === "bug" || containsAny(searchable, ["test", "regression", "flaky"])) {
-    selected.push({
-      path: path.join(custom, "regression-testing", "SKILL.md"),
-      reason: "ticket or phase context requires regression-focused verification",
-    });
-  }
-  return selected;
+  return selectors
+    .filter((selector) => selectorMatches(selector, ticket, payload, purpose))
+    .map((selector) => ({
+      path: path.join(custom, selector.skill, "SKILL.md"),
+      reason: selector.reason,
+    }));
 }
 
 function containsAny(value: string, terms: readonly string[]): boolean {
   return terms.some((term) => value.includes(term));
+}
+
+function selectorMatches(
+  selector: SkillSelector,
+  ticket: TicketContext,
+  payload: unknown,
+  purpose: ExecutionPurpose,
+): boolean {
+  const { match } = selector;
+  if (match.purposes !== undefined && !match.purposes.includes(purpose.kind)) return false;
+  if (
+    match.reviewers !== undefined &&
+    (purpose.kind !== "review" || !match.reviewers.includes(purpose.reviewer))
+  ) {
+    return false;
+  }
+  const searchable =
+    `${ticket.title} ${ticket.body} ${ticket.component ?? ""} ${JSON.stringify(payload)}`.toLowerCase();
+  const signals: boolean[] = [];
+  if (match.workTypes !== undefined) signals.push(match.workTypes.includes(ticket.workType));
+  if (match.components !== undefined) {
+    const component = ticket.component?.toLowerCase();
+    signals.push(
+      component !== undefined &&
+        match.components.some((candidate) => candidate.toLowerCase() === component),
+    );
+  }
+  if (match.riskFlags !== undefined) {
+    signals.push(match.riskFlags.some((risk) => searchable.includes(risk)));
+  }
+  if (match.keywords !== undefined) {
+    signals.push(
+      containsAny(
+        searchable,
+        match.keywords.map((keyword) => keyword.toLowerCase()),
+      ),
+    );
+  }
+  return signals.length === 0 || signals.some(Boolean);
+}
+
+function agentResourceRoot(root: string, agent: AgentProfileSnapshot): string {
+  const harnessRoot = path.join(root, "harnesses", agent.harness);
+  return agent.resourceProfile === "default"
+    ? harnessRoot
+    : path.join(harnessRoot, "profiles", agent.resourceProfile);
 }
 
 const configurationSchema = z.record(
@@ -224,6 +260,8 @@ export { redactKnownSecrets };
 function executionPackageDigest(input: Omit<ExecutionPackage, "executionId" | "digest">): string {
   return sha256(
     JSON.stringify({
+      agentProfile: input.agentProfile,
+      agentProfileDigest: input.agentProfileDigest,
       harness: input.harness,
       purpose: input.purpose,
       prompt: input.prompt,

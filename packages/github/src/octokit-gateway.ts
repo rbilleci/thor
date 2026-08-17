@@ -1,20 +1,28 @@
 import { createAppAuth } from "@octokit/auth-app";
 import { Octokit } from "@octokit/core";
+import { retry } from "@octokit/plugin-retry";
+import { throttling } from "@octokit/plugin-throttling";
 import {
+  boardStateKeySchema,
+  type DependencyPolicy,
+  type ResolvedProjectFields,
+  type TicketDefaults,
+} from "@thor/config/schema";
+import {
+  agentPolicySchema,
+  approvalPolicySchema,
   deferredIssueIdSchema,
+  executionModeSchema,
+  issueIdSchema,
+  planningDepthSchema,
+  prioritySchema,
   projectItemIdSchema,
   redactKnownSecrets,
   ticketContextSchema,
-  ticketStatusSchema,
-  type AgentPolicy,
-  type ApprovalPolicy,
-  type ExecutionMode,
-  type PlanningDepth,
-  type Priority,
+  ticketContextsEqual,
+  workTypeSchema,
   type ProjectItemId,
   type RepositoryRef,
-  type TicketStatus,
-  type WorkType,
 } from "@thor/domain";
 import { z } from "zod";
 
@@ -24,6 +32,7 @@ import type {
   GitHubGateway,
   MergeReadiness,
   ProjectItemSnapshot,
+  ProjectItemObservation,
   PullRequestRef,
   StatusTransition,
 } from "./types.js";
@@ -35,18 +44,32 @@ export type GitHubAuth =
 
 export type GitHubProjectConfiguration = {
   projectId: string;
-  statusFieldId: string;
-  statusOptions: Readonly<Partial<Record<TicketStatus, string>>>;
+  fields: ResolvedProjectFields;
+  ticketDefaults: TicketDefaults;
+  dependencyCompletion: DependencyPolicy["completion"];
+  doneOptionId: string;
 };
 
-export type OctokitGatewayOptions = {
+export type OctokitClientOptions = {
   auth: GitHubAuth;
-  project: GitHubProjectConfiguration;
   apiUrl?: string;
   apiVersion?: string;
+  resilience?: {
+    requestRetries?: number;
+    retryAfterBaseValueMs?: number;
+    throttleEnabled?: boolean;
+  };
+};
+
+export type OctokitGatewayOptions = OctokitClientOptions & {
+  project: GitHubProjectConfiguration;
 };
 
 export const DEFAULT_GITHUB_API_VERSION = "2026-03-10";
+export const GITHUB_MAX_RETRY_DELAY_MS = 5 * 60 * 1_000;
+
+const ResilientOctokit = Octokit.plugin(retry, throttling);
+const retryableRequestDoNotRetry = [400, 401, 403, 404, 410, 422, 429, 451];
 
 const projectItemQuery = `
   query ThorProjectItem($id: ID!) {
@@ -75,7 +98,13 @@ const projectItemQuery = `
             title
             body
             repository { name owner { login } }
-            blockedBy(first: 50) { nodes { id state } }
+            blockedBy(first: 50) {
+              nodes {
+                id
+                state
+              }
+              pageInfo { hasNextPage endCursor }
+            }
           }
         }
       }
@@ -89,6 +118,16 @@ const fieldValueSchema = z.looseObject({
   text: z.string().nullable().optional(),
   field: z.object({ id: z.string(), name: z.string() }).nullable().optional(),
 });
+const pageInfoSchema = z.object({
+  hasNextPage: z.boolean(),
+  endCursor: z.string().nullable(),
+});
+const blockedByIssueSchema = z.object({ id: z.string(), state: z.string() });
+type BlockedByIssue = z.infer<typeof blockedByIssueSchema>;
+const blockedByPageSchema = z.object({
+  nodes: z.array(blockedByIssueSchema.nullable()),
+  pageInfo: pageInfoSchema,
+});
 const projectItemResponseSchema = z.object({
   node: z
     .object({
@@ -96,16 +135,38 @@ const projectItemResponseSchema = z.object({
       updatedAt: z.string(),
       project: z.object({ id: z.string() }),
       fieldValues: z.object({ nodes: z.array(fieldValueSchema.nullable()) }),
-      content: z.object({
-        id: z.string(),
-        number: z.number().int().positive(),
-        title: z.string(),
-        body: z.string().nullable(),
-        repository: z.object({ name: z.string(), owner: z.object({ login: z.string() }) }),
-        blockedBy: z.object({
-          nodes: z.array(z.object({ id: z.string(), state: z.string() }).nullable()),
-        }),
+      content: z
+        .object({
+          id: z.string(),
+          number: z.number().int().positive(),
+          title: z.string(),
+          body: z.string().nullable(),
+          repository: z.object({ name: z.string(), owner: z.object({ login: z.string() }) }),
+          blockedBy: blockedByPageSchema,
+        })
+        .nullable(),
+    })
+    .nullable(),
+});
+const blockedByPageResponseSchema = z.object({
+  node: z.object({ blockedBy: blockedByPageSchema }).nullable(),
+});
+const dependencyProjectItemsResponseSchema = z.object({
+  node: z
+    .object({
+      projectItems: z.object({
+        nodes: z.array(
+          z.object({ id: projectItemIdSchema, project: z.object({ id: z.string() }) }).nullable(),
+        ),
+        pageInfo: pageInfoSchema,
       }),
+    })
+    .nullable(),
+});
+const dependencyProjectStatusResponseSchema = z.object({
+  node: z
+    .object({
+      fieldValues: z.object({ nodes: z.array(fieldValueSchema.nullable()) }),
     })
     .nullable(),
 });
@@ -124,13 +185,152 @@ export class OctokitGitHubGateway implements GitHubGateway {
       if (parsed.node === null) {
         throw new GitHubError(`Project item ${projectItemId} was not found`, false, "not_found");
       }
-      return mapProjectItem(parsed.node, this.options.project.statusFieldId);
+      if (parsed.node.content === null) return mapProjectItem(parsed.node, this.options.project);
+      const dependencies = await this.loadBlockedBy(
+        parsed.node.content.id,
+        parsed.node.content.blockedBy,
+      );
+      const managedDependencyDone = await this.loadManagedDependencyDone(dependencies);
+      return mapProjectItem(
+        {
+          ...parsed.node,
+          content: {
+            ...parsed.node.content,
+            blockedBy: {
+              nodes: dependencies,
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          },
+        },
+        this.options.project,
+        managedDependencyDone,
+      );
     } catch (error) {
       throw normalizeGitHubError(error);
     }
   }
 
-  public async listProjectItemsUpdatedSince(since: string): Promise<ProjectItemSnapshot[]> {
+  private async loadBlockedBy(
+    issueId: string,
+    firstPage: NonNullable<
+      NonNullable<z.infer<typeof projectItemResponseSchema>["node"]>["content"]
+    >["blockedBy"],
+  ): Promise<BlockedByIssue[]> {
+    const dependencies = firstPage.nodes.filter(
+      (dependency): dependency is BlockedByIssue => dependency !== null,
+    );
+    let cursor = nextCursor(firstPage.pageInfo, `Issue ${issueId} blockedBy`);
+    while (cursor !== undefined) {
+      const response: unknown = await this.octokit.graphql(
+        `query ThorBlockedBy($id: ID!, $after: String!) {
+          node(id: $id) {
+            ... on Issue {
+              blockedBy(first: 50, after: $after) {
+                nodes { id state }
+                pageInfo { hasNextPage endCursor }
+              }
+            }
+          }
+        }`,
+        { id: issueId, after: cursor },
+      );
+      const page = blockedByPageResponseSchema.parse(response).node?.blockedBy;
+      if (page === undefined) {
+        throw new GitHubError(
+          `Issue ${issueId} was unavailable while reading dependencies`,
+          true,
+          "unavailable",
+        );
+      }
+      dependencies.push(
+        ...page.nodes.filter((dependency): dependency is BlockedByIssue => dependency !== null),
+      );
+      cursor = nextCursor(page.pageInfo, `Issue ${issueId} blockedBy`);
+    }
+    return dependencies;
+  }
+
+  private async loadManagedDependencyDone(
+    dependencies: readonly BlockedByIssue[],
+  ): Promise<ReadonlyMap<string, boolean>> {
+    const results = new Map<string, boolean>();
+    for (const dependency of dependencies) {
+      if (!projectStateCanAffectCompletion(dependency, this.options.project)) continue;
+      const projectItemId = await this.findManagedProjectItemId(dependency.id);
+      if (projectItemId !== undefined) {
+        results.set(dependency.id, await this.projectItemIsDone(projectItemId));
+      }
+    }
+    return results;
+  }
+
+  private async findManagedProjectItemId(issueId: string): Promise<ProjectItemId | undefined> {
+    let cursor: string | undefined;
+    do {
+      const response: unknown = await this.octokit.graphql(
+        `query ThorDependencyProjectItems($id: ID!, $after: String) {
+          node(id: $id) {
+            ... on Issue {
+              projectItems(first: 100, after: $after) {
+                nodes { id project { id } }
+                pageInfo { hasNextPage endCursor }
+              }
+            }
+          }
+        }`,
+        { id: issueId, ...(cursor === undefined ? {} : { after: cursor }) },
+      );
+      const projectItems = dependencyProjectItemsResponseSchema.parse(response).node?.projectItems;
+      if (projectItems === undefined) {
+        throw new GitHubError(
+          `Dependency Issue ${issueId} was unavailable while reading Project membership`,
+          true,
+          "unavailable",
+        );
+      }
+      const managed = projectItems.nodes.find(
+        (item) => item?.project.id === this.options.project.projectId,
+      );
+      if (managed !== undefined && managed !== null) return managed.id;
+      cursor = nextCursor(projectItems.pageInfo, `Issue ${issueId} projectItems`);
+    } while (cursor !== undefined);
+    return undefined;
+  }
+
+  private async projectItemIsDone(projectItemId: ProjectItemId): Promise<boolean> {
+    const response: unknown = await this.octokit.graphql(
+      `query ThorDependencyProjectStatus($id: ID!) {
+        node(id: $id) {
+          ... on ProjectV2Item {
+            fieldValues(first: 100) {
+              nodes {
+                ... on ProjectV2ItemFieldSingleSelectValue {
+                  optionId
+                  field { ... on ProjectV2SingleSelectField { id name } }
+                }
+              }
+            }
+          }
+        }
+      }`,
+      { id: projectItemId },
+    );
+    const item = dependencyProjectStatusResponseSchema.parse(response).node;
+    if (item === null) {
+      throw new GitHubError(
+        `Dependency Project item ${projectItemId} was not found`,
+        true,
+        "unavailable",
+      );
+    }
+    return item.fieldValues.nodes.some(
+      (value) =>
+        value?.field?.id === this.options.project.fields.lifecycle.fieldId &&
+        value.optionId === this.options.project.doneOptionId,
+    );
+  }
+
+  public async listProjectItemObservations(): Promise<ProjectItemObservation[]> {
     try {
       const ids: ProjectItemId[] = [];
       let cursor: string | undefined;
@@ -169,37 +369,61 @@ export class OctokitGitHubGateway implements GitHubGateway {
           })
           .parse(response);
         const items = parsed.node?.items;
-        if (items === undefined) break;
+        if (items === undefined) {
+          throw new GitHubError(
+            `GitHub Project ${this.options.project.projectId} was not available for a complete scan`,
+            true,
+            "unavailable",
+          );
+        }
         ids.push(
           ...items.nodes
-            .filter(
-              (item): item is NonNullable<typeof item> => item !== null && item.updatedAt > since,
-            )
+            .filter((item): item is NonNullable<typeof item> => item !== null)
             .map((item) => item.id),
         );
+        if (items.pageInfo.hasNextPage && items.pageInfo.endCursor === null) {
+          throw new GitHubError(
+            `GitHub Project ${this.options.project.projectId} returned an incomplete pagination cursor`,
+            true,
+            "unavailable",
+          );
+        }
         cursor = items.pageInfo.hasNextPage ? (items.pageInfo.endCursor ?? undefined) : undefined;
       } while (cursor !== undefined);
-      return await Promise.all(ids.map((id) => this.getProjectItem(id)));
+      return await loadProjectItemsIndependently(ids, (id) => this.getProjectItem(id));
     } catch (error) {
       throw normalizeGitHubError(error);
     }
   }
 
   public async transitionStatus(transition: StatusTransition): Promise<ProjectItemSnapshot> {
-    const current = await this.getProjectItem(transition.projectItemId);
-    if (current.status === transition.targetStatus) return current;
-    if (
-      current.status !== transition.expectedStatus ||
-      (transition.expectedUpdatedAt !== undefined &&
-        current.updatedAt !== transition.expectedUpdatedAt)
+    let current = await this.getProjectItem(transition.projectItemId);
+    if (current.status === transition.targetStatus) {
+      assertTargetSnapshotCompatible(current, transition);
+      return current;
+    }
+    for (
+      let attempt = 0;
+      attempt < 4 &&
+      current.status !== transition.expectedStatus &&
+      transitionSnapshotMayBeStale(current, transition);
+      attempt += 1
     ) {
+      await delay(250);
+      current = await this.getProjectItem(transition.projectItemId);
+      if (current.status === transition.targetStatus) {
+        assertTargetSnapshotCompatible(current, transition);
+        return current;
+      }
+    }
+    if (statusTransitionConflicts(current, transition)) {
       throw new GitHubError(
         `Project item changed from expected ${transition.expectedStatus} before transition`,
         false,
         "conflict",
       );
     }
-    const optionId = this.options.project.statusOptions[transition.targetStatus];
+    const optionId = this.options.project.fields.lifecycle.options[transition.targetStatus];
     if (optionId === undefined) {
       throw new GitHubError(
         `No GitHub status option is configured for ${transition.targetStatus}`,
@@ -220,11 +444,15 @@ export class OctokitGitHubGateway implements GitHubGateway {
         {
           project: this.options.project.projectId,
           item: transition.projectItemId,
-          field: this.options.project.statusFieldId,
+          field: this.options.project.fields.lifecycle.fieldId,
           option: optionId,
         },
       );
-      return await this.getProjectItem(transition.projectItemId);
+      const updated = await this.getProjectItem(transition.projectItemId);
+      if (updated.status === transition.targetStatus) {
+        assertTargetSnapshotCompatible(updated, transition);
+      }
+      return updated;
     } catch (error) {
       throw normalizeGitHubError(error);
     }
@@ -416,7 +644,7 @@ export class OctokitGitHubGateway implements GitHubGateway {
         ...(mergeable ? {} : { reason: pull.mergeable_state }),
         headSha: pull.head.sha,
         merged: pull.merged,
-        ...(pull.merge_commit_sha === null ? {} : { mergeCommitSha: pull.merge_commit_sha }),
+        ...(pull.merge_commit_sha == null ? {} : { mergeCommitSha: pull.merge_commit_sha }),
       };
     } catch (error) {
       throw normalizeGitHubError(error);
@@ -457,6 +685,19 @@ export class OctokitGitHubGateway implements GitHubGateway {
         throw new GitHubError(parsed.message, false, "conflict");
       }
       return parsed.sha;
+    } catch (error) {
+      throw normalizeGitHubError(error);
+    }
+  }
+
+  public async closeIssue(repository: RepositoryRef, issueNumber: number): Promise<void> {
+    try {
+      await this.octokit.request("PATCH /repos/{owner}/{repo}/issues/{issue_number}", {
+        owner: repository.owner,
+        repo: repository.name,
+        issue_number: issueNumber,
+        state: "closed",
+      });
     } catch (error) {
       throw normalizeGitHubError(error);
     }
@@ -526,6 +767,84 @@ export class OctokitGitHubGateway implements GitHubGateway {
   }
 }
 
+export async function loadProjectItemsIndependently(
+  projectItemIds: readonly ProjectItemId[],
+  load: (projectItemId: ProjectItemId) => Promise<ProjectItemSnapshot>,
+): Promise<ProjectItemObservation[]> {
+  const observations: ProjectItemObservation[] = [];
+  const concurrency = 4;
+  for (let offset = 0; offset < projectItemIds.length; offset += concurrency) {
+    observations.push(
+      ...(await Promise.all(
+        projectItemIds
+          .slice(offset, offset + concurrency)
+          .map(async (projectItemId): Promise<ProjectItemObservation> => {
+            try {
+              return { kind: "present", projectItemId, snapshot: await load(projectItemId) };
+            } catch (error) {
+              const normalized = normalizeGitHubError(error);
+              const reason = redactKnownSecrets(normalized.message);
+              return normalized.code === "not_found"
+                ? { kind: "removed", projectItemId, reason }
+                : {
+                    kind: "unreadable",
+                    projectItemId,
+                    reason,
+                    retryable: normalized.retryable,
+                  };
+            }
+          }),
+      )),
+    );
+  }
+  return observations;
+}
+
+export function statusTransitionConflicts(
+  current: ProjectItemSnapshot,
+  transition: StatusTransition,
+): boolean {
+  const ticketChanged =
+    transition.expectedTicket !== undefined &&
+    !ticketContextsEqual(current.ticket, transition.expectedTicket);
+  // Nested dependency state can change without updating the dependent Project item's timestamp.
+  // Ticket context is therefore an independent compare-and-set guard, while updatedAt alone may
+  // reflect unrelated Project metadata and must not cause a conflict.
+  return current.status !== transition.expectedStatus || ticketChanged;
+}
+
+function assertTargetSnapshotCompatible(
+  current: ProjectItemSnapshot,
+  transition: StatusTransition,
+): void {
+  if (
+    transition.expectedTicket !== undefined &&
+    !ticketContextsEqual(current.ticket, transition.expectedTicket)
+  ) {
+    throw new GitHubError(
+      `Project item reached ${transition.targetStatus}, but its ticket context changed concurrently`,
+      false,
+      "conflict",
+    );
+  }
+}
+
+export function transitionSnapshotMayBeStale(
+  current: ProjectItemSnapshot,
+  transition: StatusTransition,
+): boolean {
+  if (transition.expectedUpdatedAt === undefined || transition.expectedTicket === undefined) {
+    return false;
+  }
+  if (!ticketContextsEqual(current.ticket, transition.expectedTicket)) return false;
+  if (current.updatedAt === transition.expectedUpdatedAt) return true;
+  const currentTime = Date.parse(current.updatedAt);
+  const expectedTime = Date.parse(transition.expectedUpdatedAt);
+  return (
+    Number.isFinite(currentTime) && Number.isFinite(expectedTime) && currentTime < expectedTime
+  );
+}
+
 const pullResponseSchema = z.object({
   number: z.number().int().positive(),
   node_id: z.string(),
@@ -537,7 +856,7 @@ const pullDetailSchema = pullResponseSchema.extend({
   merged: z.boolean(),
   mergeable: z.boolean().nullable(),
   mergeable_state: z.string(),
-  merge_commit_sha: z.string().nullable(),
+  merge_commit_sha: z.string().nullable().optional(),
 });
 const issueResponseSchema = z.object({
   number: z.number().int().positive(),
@@ -556,80 +875,98 @@ function mapPull(pull: z.infer<typeof pullResponseSchema>): PullRequestRef {
   };
 }
 
-function mapProjectItem(
+export function mapProjectItem(
   item: NonNullable<z.infer<typeof projectItemResponseSchema>["node"]>,
-  statusFieldId: string,
+  configuration: GitHubProjectConfiguration,
+  managedDependencyDone: ReadonlyMap<string, boolean> = new Map(),
 ): ProjectItemSnapshot {
-  const fields = new Map<string, string>();
-  let status: TicketStatus = "backlog";
+  if (item.project.id !== configuration.projectId) {
+    throw new GitHubError(
+      `Project item ${item.id} belongs to ${item.project.id}, expected ${configuration.projectId}`,
+      false,
+      "invalid_response",
+    );
+  }
+  const values = new Map<string, z.infer<typeof fieldValueSchema>>();
   for (const value of item.fieldValues.nodes) {
     if (value?.field == null) continue;
-    const fieldValue = value.name ?? value.text;
-    if (fieldValue !== undefined && fieldValue !== null) fields.set(value.field.name, fieldValue);
-    if (value.field.id === statusFieldId && value.name != null) status = parseStatus(value.name);
+    values.set(value.field.id, value);
   }
+  const status = readSelect(
+    configuration.fields.lifecycle,
+    values,
+    undefined,
+    boardStateKeySchema,
+    "lifecycle",
+  );
   const content = item.content;
+  if (content === null) {
+    throw new GitHubError(
+      `Project item ${item.id} no longer has GitHub Issue content`,
+      false,
+      "not_found",
+    );
+  }
+  const component = readText(configuration.fields.component, values, "component");
   const ticket = ticketContextSchema.parse({
     projectItemId: item.id,
+    issueId: issueIdSchema.parse(content.id),
     repository: { owner: content.repository.owner.login, name: content.repository.name },
     issueNumber: content.number,
     title: redactKnownSecrets(content.title),
     body: redactKnownSecrets(content.body ?? ""),
-    workType: mapWorkTypeField(fields),
-    priority: parseEnumField<Priority>(
-      fields.get("Priority"),
-      { p0: "P0", p1: "P1", p2: "P2", p3: "P3" },
-      "P2",
+    workType: readSelect(
+      configuration.fields.workType,
+      values,
+      configuration.ticketDefaults.workType,
+      workTypeSchema,
+      "work type",
     ),
-    ...(fields.get("Component / Area") === undefined
-      ? {}
-      : { component: redactKnownSecrets(fields.get("Component / Area") ?? "") }),
+    priority: readSelect(
+      configuration.fields.priority,
+      values,
+      configuration.ticketDefaults.priority,
+      prioritySchema,
+      "priority",
+    ),
+    ...(component === undefined ? {} : { component: redactKnownSecrets(component) }),
     acceptanceCriteria: extractAcceptanceCriteria(redactKnownSecrets(content.body ?? "")),
     dependencies: content.blockedBy.nodes
       .filter((dependency): dependency is NonNullable<typeof dependency> => dependency !== null)
-      .map((dependency) => ({ issueId: dependency.id, complete: dependency.state === "CLOSED" })),
+      .map((dependency) => ({
+        issueId: dependency.id,
+        complete: dependencyIsComplete(dependency, configuration, managedDependencyDone),
+      })),
     policy: {
-      executionMode: parseEnumField<ExecutionMode>(
-        fields.get("Execution Mode"),
-        {
-          human: "human",
-          agent: "agent",
-          "human + agent": "human_and_agent",
-          disabled: "disabled",
-        },
-        "agent",
+      executionMode: readSelect(
+        configuration.fields.executionMode,
+        values,
+        configuration.ticketDefaults.executionMode,
+        executionModeSchema,
+        "execution mode",
       ),
-      planningDepth: parseEnumField<PlanningDepth>(
-        fields.get("Planning Depth"),
-        {
-          none: "none",
-          light: "light",
-          full: "full",
-          "architecture review": "architecture_review",
-        },
-        "full",
+      planningDepth: readSelect(
+        configuration.fields.planningDepth,
+        values,
+        configuration.ticketDefaults.planningDepth,
+        planningDepthSchema,
+        "planning depth",
       ),
-      approvalPolicy: parseEnumField<ApprovalPolicy>(
-        fields.get("Approval Policy"),
-        {
-          autonomous: "autonomous",
-          "blueprint review": "blueprint_review",
-          "pre-merge review": "pre_merge_review",
-          "blueprint + pre-merge review": "blueprint_and_pre_merge_review",
-        },
-        "autonomous",
+      approvalPolicy: readSelect(
+        configuration.fields.approvalPolicy,
+        values,
+        configuration.ticketDefaults.approvalPolicy,
+        approvalPolicySchema,
+        "approval policy",
       ),
-      agentPolicy: parseEnumField<AgentPolicy>(
-        fields.get("Agent Policy"),
-        {
-          disabled: "disabled",
-          allowed: "allowed",
-          preferred: "preferred",
-          required: "required",
-        },
-        "preferred",
+      agentPolicy: readSelect(
+        configuration.fields.agentPolicy,
+        values,
+        configuration.ticketDefaults.agentPolicy,
+        agentPolicySchema,
+        "agent policy",
       ),
-      autonomousRepairBudget: 3,
+      autonomousRepairBudget: configuration.ticketDefaults.autonomousRepairBudget,
     },
   });
   return {
@@ -641,57 +978,85 @@ function mapProjectItem(
   };
 }
 
-/** Maps the legacy Type field and GitHub-compatible Work Type alias into Thor's domain. */
-export function mapWorkTypeField(fields: ReadonlyMap<string, string>): WorkType {
-  return parseEnumField<WorkType>(
-    fields.get("Type") ?? fields.get("Work Type"),
-    {
-      feature: "feature",
-      bug: "bug",
-      task: "task",
-      spike: "spike",
-      chore: "chore",
-      documentation: "documentation",
-    },
-    "task",
-  );
+function dependencyIsComplete(
+  dependency: NonNullable<
+    NonNullable<z.infer<typeof projectItemResponseSchema>["node"]>["content"]
+  >["blockedBy"]["nodes"][number] & {},
+  configuration: GitHubProjectConfiguration,
+  managedDependencyDone: ReadonlyMap<string, boolean>,
+): boolean {
+  const issueClosed = dependency.state === "CLOSED";
+  if (configuration.dependencyCompletion === "issue_closed") return issueClosed;
+  const projectDone = managedDependencyDone.get(dependency.id);
+  if (projectDone === undefined) return issueClosed;
+  return configuration.dependencyCompletion === "issue_closed_or_project_done"
+    ? issueClosed || projectDone
+    : issueClosed && projectDone;
 }
 
-function parseStatus(value: string): TicketStatus {
-  const normalized = value
-    .trim()
-    .toLowerCase()
-    .replaceAll("/", " ")
-    .replaceAll("-", " ")
-    .replace(/\s+/g, "_");
-  const aliases: Readonly<Record<string, TicketStatus>> = {
-    design_blueprint: "design_blueprint",
-    awaiting_blueprint_approval: "awaiting_blueprint_approval",
-    ready_for_review: "ready_for_review",
-    in_review: "in_review",
-    re_review: "re_review",
-    awaiting_human_merge_review: "awaiting_human_merge_review",
-    ready_to_merge: "ready_to_merge",
-  };
-  return aliases[normalized] ?? ticketStatusSchema.parse(normalized);
+function projectStateCanAffectCompletion(
+  dependency: BlockedByIssue,
+  configuration: GitHubProjectConfiguration,
+): boolean {
+  if (configuration.dependencyCompletion === "issue_closed") return false;
+  const issueClosed = dependency.state === "CLOSED";
+  return configuration.dependencyCompletion === "issue_closed_or_project_done"
+    ? !issueClosed
+    : issueClosed;
 }
 
-function parseEnumField<Value extends string>(
-  value: string | undefined,
-  mapping: Readonly<Record<string, Value>>,
-  fallback: Value,
+type ResolvedSelectField = ResolvedProjectFields["lifecycle"];
+type FieldValue = z.infer<typeof fieldValueSchema>;
+
+function readSelect<Value>(
+  binding: ResolvedSelectField | undefined,
+  values: ReadonlyMap<string, FieldValue>,
+  fallback: Value | undefined,
+  schema: z.ZodType<Value>,
+  semanticName: string,
 ): Value {
-  if (value === undefined) return fallback;
-  const normalized = value.trim().toLowerCase();
-  const mapped = mapping[normalized];
-  if (mapped === undefined) {
+  if (binding === undefined) {
+    if (fallback !== undefined) return fallback;
+    throw missingFieldValue(semanticName);
+  }
+  const optionId = values.get(binding.fieldId)?.optionId;
+  if (optionId == null) {
+    if (!binding.requiredOnItems && fallback !== undefined) return fallback;
+    throw missingFieldValue(semanticName);
+  }
+  const semanticValue = Object.entries(binding.options).find(
+    ([, configuredOptionId]) => configuredOptionId === optionId,
+  )?.[0];
+  if (semanticValue === undefined) {
     throw new GitHubError(
-      `Unsupported GitHub Project field value: ${value}`,
+      `GitHub Project ${semanticName} option ${optionId} is not present in the compiled binding`,
       false,
       "invalid_response",
     );
   }
-  return mapped;
+  return schema.parse(semanticValue);
+}
+
+function readText(
+  binding: ResolvedProjectFields["component"],
+  values: ReadonlyMap<string, FieldValue>,
+  semanticName: string,
+): string | undefined {
+  if (binding === undefined) return undefined;
+  const text = values.get(binding.fieldId)?.text?.trim();
+  if (text === undefined || text.length === 0) {
+    if (!binding.requiredOnItems) return undefined;
+    throw missingFieldValue(semanticName);
+  }
+  return text;
+}
+
+function missingFieldValue(semanticName: string): GitHubError {
+  return new GitHubError(
+    `GitHub Project item is missing required ${semanticName} configuration`,
+    false,
+    "invalid_response",
+  );
 }
 
 function extractAcceptanceCriteria(body: string): string[] {
@@ -702,23 +1067,54 @@ function extractAcceptanceCriteria(body: string): string[] {
   return lines.length === 0 ? ["Satisfy the ticket description"] : lines;
 }
 
-function createOctokit(options: OctokitGatewayOptions): Octokit {
+export function createOctokit(options: OctokitClientOptions): Octokit {
   const baseUrl = options.apiUrl;
   const apiVersion = options.apiVersion ?? DEFAULT_GITHUB_API_VERSION;
+  const retryAfterBaseValue = options.resilience?.retryAfterBaseValueMs ?? 1_000;
+  const maxRetryDelaySeconds = GITHUB_MAX_RETRY_DELAY_MS / 1_000;
+  const throttle =
+    options.resilience?.throttleEnabled === false
+      ? { enabled: false as const }
+      : {
+          retryAfterBaseValue,
+          fallbackSecondaryRateRetryAfter: 60,
+          onRateLimit: (
+            retryAfter: number,
+            _request: unknown,
+            _octokit: unknown,
+            retryCount: number,
+          ) => retryCount < 1 && retryAfter <= maxRetryDelaySeconds,
+          onSecondaryRateLimit: (
+            retryAfter: number,
+            _request: unknown,
+            _octokit: unknown,
+            retryCount: number,
+          ) => retryCount < 1 && retryAfter <= maxRetryDelaySeconds,
+        };
+  const resilience = {
+    retry: {
+      retries: options.resilience?.requestRetries ?? 3,
+      retryAfterBaseValue,
+      doNotRetry: retryableRequestDoNotRetry,
+    },
+    throttle,
+  };
   let octokit: Octokit;
   if (options.auth.kind === "token") {
-    octokit = new Octokit({
+    octokit = new ResilientOctokit({
       auth: options.auth.token,
+      ...resilience,
       ...(baseUrl === undefined ? {} : { baseUrl }),
     });
   } else {
-    octokit = new Octokit({
+    octokit = new ResilientOctokit({
       authStrategy: createAppAuth,
       auth: {
         appId: options.auth.appId,
         privateKey: options.auth.privateKey,
         installationId: options.auth.installationId,
       },
+      ...resilience,
       ...(baseUrl === undefined ? {} : { baseUrl }),
     });
   }
@@ -738,9 +1134,35 @@ function hasStatus(error: unknown, status: number): boolean {
   );
 }
 
-function normalizeGitHubError(error: unknown): GitHubError {
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function nextCursor(
+  pageInfo: z.infer<typeof pageInfoSchema>,
+  connectionName: string,
+): string | undefined {
+  if (!pageInfo.hasNextPage) return undefined;
+  if (pageInfo.endCursor === null) {
+    throw new GitHubError(
+      `${connectionName} returned an incomplete pagination cursor`,
+      true,
+      "unavailable",
+    );
+  }
+  return pageInfo.endCursor;
+}
+
+export function normalizeGitHubError(error: unknown): GitHubError {
   if (error instanceof GitHubError) return error;
   const message = error instanceof Error ? error.message : String(error);
+  const retryAfterMs = githubRetryAfterMs(error);
+  if (hasStatus(error, 429) || retryAfterMs !== undefined || /rate[ -]?limit/i.test(message)) {
+    return new GitHubError(message, true, "rate_limited", {
+      cause: error,
+      ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+    });
+  }
   if (hasStatus(error, 401) || hasStatus(error, 403)) {
     return new GitHubError(message, false, "authentication", { cause: error });
   }
@@ -748,8 +1170,6 @@ function normalizeGitHubError(error: unknown): GitHubError {
   if (hasStatus(error, 409) || hasStatus(error, 422)) {
     return new GitHubError(message, false, "conflict", { cause: error });
   }
-  if (hasStatus(error, 429))
-    return new GitHubError(message, true, "rate_limited", { cause: error });
   if (/5\d\d|timeout|connection|network/i.test(message)) {
     return new GitHubError(message, true, "unavailable", { cause: error });
   }
@@ -757,4 +1177,40 @@ function normalizeGitHubError(error: unknown): GitHubError {
     return new GitHubError(z.prettifyError(error), false, "invalid_response", { cause: error });
   }
   return new GitHubError(message, true, "unavailable", { cause: error });
+}
+
+export function githubRetryAfterMs(error: unknown, nowMs: number = Date.now()): number | undefined {
+  const retryAfter = responseHeader(error, "retry-after");
+  const retryAfterSeconds = retryAfter === undefined ? undefined : Number(retryAfter);
+  if (retryAfterSeconds !== undefined && Number.isFinite(retryAfterSeconds)) {
+    return capRetryDelay(Math.max(0, retryAfterSeconds * 1_000));
+  }
+  if (retryAfter !== undefined) {
+    const retryAt = Date.parse(retryAfter);
+    if (Number.isFinite(retryAt)) return capRetryDelay(Math.max(0, retryAt - nowMs));
+  }
+  if (responseHeader(error, "x-ratelimit-remaining") !== "0") return undefined;
+  const reset = responseHeader(error, "x-ratelimit-reset");
+  if (reset === undefined) return undefined;
+  const resetSeconds = Number(reset);
+  if (!Number.isFinite(resetSeconds)) return undefined;
+  return capRetryDelay(Math.max(0, resetSeconds * 1_000 - nowMs + 1_000));
+}
+
+function capRetryDelay(milliseconds: number): number {
+  return Math.min(milliseconds, GITHUB_MAX_RETRY_DELAY_MS);
+}
+
+function responseHeader(error: unknown, name: string): string | undefined {
+  const response = property(error, "response");
+  const headers = property(response, "headers");
+  if (headers instanceof Headers) return headers.get(name) ?? undefined;
+  const value = property(headers, name) ?? property(headers, name.toLowerCase());
+  if (typeof value === "string") return value;
+  if (typeof value === "number") return value.toString();
+  return undefined;
+}
+
+function property(value: unknown, key: string): unknown {
+  return typeof value === "object" && value !== null ? Reflect.get(value, key) : undefined;
 }

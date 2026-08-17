@@ -91,7 +91,10 @@ export function createTicketRun(ticket: TicketContext): TicketRun {
   };
 }
 
-export function nextAction(run: TicketRun): NextAction {
+export function nextAction(
+  run: TicketRun,
+  configuredReviewers: readonly ReviewerKind[] = reviewerKinds,
+): NextAction {
   switch (run.status) {
     case "design_blueprint":
       return { kind: "blueprint" };
@@ -102,14 +105,14 @@ export function nextAction(run: TicketRun): NextAction {
       return { kind: "implement" };
     case "ready_for_review":
     case "in_review":
-      return { kind: "review", reviewers: [...reviewerKinds] };
+      return { kind: "review", reviewers: [...configuredReviewers] };
     case "repairing":
       return {
         kind: "repair",
         findingIds: run.findings.filter(requiresRepair).map((finding) => finding.findingId),
       };
     case "re_review":
-      return { kind: "review", reviewers: impactReviewers(run) };
+      return { kind: "review", reviewers: impactReviewers(run, configuredReviewers) };
     case "automated_review_passed":
       if (mergeApprovalRequired(run) && run.mergeApproval !== "approved") {
         return { kind: "wait_merge_approval" };
@@ -127,6 +130,7 @@ export function nextAction(run: TicketRun): NextAction {
       return { kind: "wait" };
     case "done":
     case "cancelled":
+    case "orphaned":
       return { kind: "complete" };
   }
 }
@@ -298,6 +302,7 @@ export function recordMaterializedDeferral(
 }
 
 export function finishDeferralMaterialization(run: TicketRun): void {
+  if (run.status === "ready_to_merge") return;
   requireStatus(run, "finishDeferralMaterialization", [
     "automated_review_passed",
     "materializing_deferrals",
@@ -357,6 +362,13 @@ export function applyHumanStatus(run: TicketRun, status: TicketStatus, reason?: 
   }
 }
 
+export function orphanTicket(run: TicketRun, reason?: string): void {
+  run.status = "orphaned";
+  delete run.suspendedStatus;
+  if (reason === undefined) delete run.externalReason;
+  else run.externalReason = reason;
+}
+
 function requiresRepair(finding: NormalizedFinding): boolean {
   return finding.disposition === "blocking" || finding.disposition === "non_blocking_fix_now";
 }
@@ -378,8 +390,11 @@ function approvedDeferrals(run: TicketRun): FindingId[] {
     .map((deferral) => deferral.findingId);
 }
 
-function impactReviewers(run: TicketRun): ReviewerKind[] {
-  if (run.lastSynthesis?.fullReReview === true) return [...reviewerKinds];
+function impactReviewers(
+  run: TicketRun,
+  configuredReviewers: readonly ReviewerKind[],
+): ReviewerKind[] {
+  if (run.lastSynthesis?.fullReReview === true) return [...configuredReviewers];
   const reviewers = new Set<ReviewerKind>(["correctness", "testing"]);
   for (const finding of run.findings) {
     finding.reviewers.forEach((reviewer) => reviewers.add(reviewer));
@@ -391,7 +406,7 @@ function impactReviewers(run: TicketRun): ReviewerKind[] {
       reviewers.add("data_migration");
     if (category.includes("api") || category.includes("compat")) reviewers.add("api_compatibility");
   }
-  return reviewerKinds.filter((reviewer) => reviewers.has(reviewer));
+  return configuredReviewers.filter((reviewer) => reviewers.has(reviewer));
 }
 
 function requireStatus(run: TicketRun, operation: string, allowed: TicketStatus[]): void {

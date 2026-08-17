@@ -1,24 +1,30 @@
-import type {
-  DeferredIssueId,
-  ProjectItemId,
-  RepositoryRef,
-  TicketContext,
-  TicketStatus,
-} from "@thor/domain";
+import type { BoardStateKey } from "@thor/config/schema";
+import type { DeferredIssueId, ProjectItemId, RepositoryRef, TicketContext } from "@thor/domain";
 
 export type ProjectItemSnapshot = {
   projectItemId: ProjectItemId;
   projectId: string;
   updatedAt: string;
-  status: TicketStatus;
+  status: BoardStateKey;
   ticket: TicketContext;
 };
 
+export type ProjectItemObservation =
+  | { kind: "present"; projectItemId: ProjectItemId; snapshot: ProjectItemSnapshot }
+  | { kind: "removed"; projectItemId: ProjectItemId; reason: string }
+  | {
+      kind: "unreadable";
+      projectItemId: ProjectItemId;
+      reason: string;
+      retryable: boolean;
+    };
+
 export type StatusTransition = {
   projectItemId: ProjectItemId;
-  expectedStatus: TicketStatus;
+  expectedStatus: BoardStateKey;
   expectedUpdatedAt?: string;
-  targetStatus: TicketStatus;
+  expectedTicket?: TicketContext;
+  targetStatus: BoardStateKey;
 };
 
 export type PullRequestRef = {
@@ -58,9 +64,13 @@ export type MergeReadiness = {
   mergeCommitSha?: string;
 };
 
+export type GitHubErrorOptions = ErrorOptions & {
+  retryAfterMs?: number;
+};
+
 export type GitHubGateway = {
   getProjectItem(projectItemId: ProjectItemId): Promise<ProjectItemSnapshot>;
-  listProjectItemsUpdatedSince(since: string): Promise<ProjectItemSnapshot[]>;
+  listProjectItemObservations(): Promise<ProjectItemObservation[]>;
   transitionStatus(transition: StatusTransition): Promise<ProjectItemSnapshot>;
   ensureBranch(repository: RepositoryRef, branch: string, sourceSha: string): Promise<string>;
   ensurePullRequest(input: {
@@ -84,9 +94,12 @@ export type GitHubGateway = {
     expectedHeadSha: string;
     commitTitle: string;
   }): Promise<string>;
+  closeIssue(repository: RepositoryRef, issueNumber: number): Promise<void>;
 };
 
 export class GitHubError extends Error {
+  public readonly retryAfterMs: number | undefined;
+
   public constructor(
     message: string,
     public readonly retryable: boolean,
@@ -97,9 +110,10 @@ export class GitHubError extends Error {
       | "authentication"
       | "rate_limited"
       | "unavailable",
-    options?: ErrorOptions,
+    options?: GitHubErrorOptions,
   ) {
     super(message, options);
     this.name = "GitHubError";
+    this.retryAfterMs = options?.retryAfterMs;
   }
 }

@@ -9,8 +9,10 @@
   "include": ["**/*.ts"],
   "references": [
     { "path": "../packages/domain" },
+    { "path": "../packages/config" },
     { "path": "../packages/agent" },
     { "path": "../packages/github" },
-    { "path": "../packages/workflows" }
+    { "path": "../packages/workflows" },
+    { "path": "../packages/runtime" }
   ]
 }

@@ -1,9 +1,10 @@
+import type { BoardStateKey } from "@thor/config/schema";
 import {
   deferredIssueIdSchema,
   projectItemIdSchema,
+  ticketContextsEqual,
   type ProjectItemId,
   type RepositoryRef,
-  type TicketStatus,
 } from "@thor/domain";
 
 import type {
@@ -12,6 +13,7 @@ import type {
   GitHubGateway,
   MergeReadiness,
   ProjectItemSnapshot,
+  ProjectItemObservation,
   PullRequestRef,
   StatusTransition,
 } from "./types.js";
@@ -25,6 +27,7 @@ export class FakeGitHubGateway implements GitHubGateway {
     comments: 0,
     deferredIssues: 0,
     merges: 0,
+    closedIssues: 0,
   };
 
   private readonly items = new Map<ProjectItemId, ProjectItemSnapshot>();
@@ -33,6 +36,7 @@ export class FakeGitHubGateway implements GitHubGateway {
   private readonly comments = new Map<string, { id: number; body: string }>();
   private readonly deferredIssues = new Map<string, DeferredIssueRef>();
   private readonly readiness = new Map<string, MergeReadiness>();
+  private readonly closedIssues = new Set<string>();
 
   public constructor(items: ProjectItemSnapshot[] = []) {
     items.forEach((item) => this.items.set(item.projectItemId, structuredClone(item)));
@@ -44,21 +48,33 @@ export class FakeGitHubGateway implements GitHubGateway {
     return Promise.resolve(structuredClone(item));
   }
 
-  public async listProjectItemsUpdatedSince(since: string): Promise<ProjectItemSnapshot[]> {
+  public async listProjectItemObservations(): Promise<ProjectItemObservation[]> {
     return Promise.resolve(
       [...this.items.values()]
-        .filter((item) => item.updatedAt > since)
-        .map((item) => structuredClone(item)),
+        .map((item) => structuredClone(item))
+        .map((snapshot) => ({
+          kind: "present" as const,
+          projectItemId: snapshot.projectItemId,
+          snapshot,
+        })),
     );
   }
 
   public async transitionStatus(transition: StatusTransition): Promise<ProjectItemSnapshot> {
     const item = await this.getProjectItem(transition.projectItemId);
-    if (item.status === transition.targetStatus) return item;
+    if (item.status === transition.targetStatus) {
+      if (
+        transition.expectedTicket !== undefined &&
+        !ticketContextsEqual(item.ticket, transition.expectedTicket)
+      ) {
+        throw new GitHubError("Project ticket changed concurrently", false, "conflict");
+      }
+      return item;
+    }
     if (
       item.status !== transition.expectedStatus ||
-      (transition.expectedUpdatedAt !== undefined &&
-        item.updatedAt !== transition.expectedUpdatedAt)
+      (transition.expectedTicket !== undefined &&
+        !ticketContextsEqual(item.ticket, transition.expectedTicket))
     ) {
       throw new GitHubError("Project state changed concurrently", false, "conflict");
     }
@@ -72,10 +88,27 @@ export class FakeGitHubGateway implements GitHubGateway {
     return structuredClone(changed);
   }
 
-  public setHumanStatus(projectItemId: ProjectItemId, status: TicketStatus): void {
+  public setHumanStatus(projectItemId: ProjectItemId, status: BoardStateKey): void {
     const item = this.items.get(projectItemId);
     if (item === undefined) throw new Error("Project item not found");
     this.items.set(projectItemId, { ...item, status, updatedAt: incrementVersion(item.updatedAt) });
+  }
+
+  public setHumanTicket(
+    projectItemId: ProjectItemId,
+    update: (ticket: ProjectItemSnapshot["ticket"]) => ProjectItemSnapshot["ticket"],
+  ): void {
+    const item = this.items.get(projectItemId);
+    if (item === undefined) throw new Error("Project item not found");
+    this.items.set(projectItemId, {
+      ...item,
+      ticket: update(structuredClone(item.ticket)),
+      updatedAt: incrementVersion(item.updatedAt),
+    });
+  }
+
+  public removeProjectItem(projectItemId: ProjectItemId): void {
+    this.items.delete(projectItemId);
   }
 
   public async ensureBranch(
@@ -183,6 +216,15 @@ export class FakeGitHubGateway implements GitHubGateway {
     this.readiness.set(key, { ...status, merged: true });
     this.mutationCounts.merges += 1;
     return `merge-${input.expectedHeadSha}`;
+  }
+
+  public closeIssue(repository: RepositoryRef, issueNumber: number): Promise<void> {
+    const key = `${fullName(repository)}:${issueNumber.toString()}`;
+    if (!this.closedIssues.has(key)) {
+      this.closedIssues.add(key);
+      this.mutationCounts.closedIssues += 1;
+    }
+    return Promise.resolve();
   }
 }
 

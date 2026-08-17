@@ -1,21 +1,23 @@
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { Context } from "@temporalio/activity";
 import { ApplicationFailure } from "@temporalio/common";
 import { TestWorkflowEnvironment } from "@temporalio/testing";
 import { Worker } from "@temporalio/worker";
+import { compileRuntimeDeliveryProfile } from "@thor/config";
+import type { BoardStateKey } from "@thor/config/schema";
 import {
+  issueIdSchema,
   projectItemIdSchema,
   findingIdSchema,
   type ExecutionId,
-  type HarnessKind,
+  type TicketContext,
   type TicketPolicy,
-  type TicketStatus,
 } from "@thor/domain";
 import { afterEach, describe, expect, test } from "vitest";
 
 import {
-  blueprintDecisionSignal,
   cancelTicketSignal,
   mergeDecisionSignal,
   projectChangedSignal,
@@ -24,6 +26,7 @@ import {
 } from "./ticket-workflow.js";
 import type {
   Audited,
+  AgentActivityContext,
   ExecutionAuditRecord,
   TicketActivities,
   TicketWorkflowInput,
@@ -31,6 +34,20 @@ import type {
 
 const workflowsPath = fileURLToPath(new URL("./workflows.ts", import.meta.url));
 const projectItemId = projectItemIdSchema.parse("PVTI_test_1");
+const defaultDeclaration: unknown = JSON.parse(
+  readFileSync(
+    fileURLToPath(new URL("../../../config/templates/default-delivery.json", import.meta.url)),
+    "utf8",
+  ),
+);
+const defaultDelivery = compileRuntimeDeliveryProfile(defaultDeclaration);
+const compactDeclaration: unknown = JSON.parse(
+  readFileSync(
+    fileURLToPath(new URL("../../../config/templates/compact-delivery.json", import.meta.url)),
+    "utf8",
+  ),
+);
+const compactDelivery = compileRuntimeDeliveryProfile(compactDeclaration);
 
 describe("ticketWorkflow", () => {
   let environment: TestWorkflowEnvironment | undefined;
@@ -71,7 +88,154 @@ describe("ticketWorkflow", () => {
         "done",
       ]),
     );
+    expect(fake.events.indexOf("status:done")).toBeLessThan(fake.events.indexOf("close-issue"));
+    expect(fake.events.indexOf("close-issue")).toBeLessThan(fake.events.indexOf("summary"));
     expect(fake.summaryPublished).toBe(true);
+    await Worker.runReplayHistory({ workflowsPath }, await handle.fetchHistory(), workflowId);
+  }, 60_000);
+
+  test("leaves the source Issue open when the Workflow profile disables post-merge closure", async () => {
+    environment = await TestWorkflowEnvironment.createTimeSkipping();
+    const fake = createActivities(policy("autonomous"));
+    const delivery = {
+      ...defaultDelivery,
+      workflow: {
+        ...defaultDelivery.workflow,
+        dependencies: {
+          ...defaultDelivery.workflow.dependencies,
+          closeIssueAfterMerge: false,
+        },
+      },
+    };
+    const worker = await Worker.create({
+      connection: environment.nativeConnection,
+      taskQueue: "thor-leave-source-issue-open",
+      workflowsPath,
+      activities: fake.activities,
+    });
+    const handle = await environment.client.workflow.start(ticketWorkflow, {
+      workflowId: `github-project-item:${projectItemId}:leave-source-open`,
+      taskQueue: "thor-leave-source-issue-open",
+      args: [workflowInput(delivery)],
+    });
+    const result = await worker.runUntil(handle.result());
+
+    expect(result.run.status).toBe("done");
+    expect(fake.events).not.toContain("close-issue");
+  }, 60_000);
+
+  test("runs a compact projected board with its configured reviewers and agent profiles", async () => {
+    environment = await TestWorkflowEnvironment.createTimeSkipping();
+    const fake = createActivities(policy("autonomous"), "design");
+    const worker = await Worker.create({
+      connection: environment.nativeConnection,
+      taskQueue: "thor-compact-profile",
+      workflowsPath,
+      activities: fake.activities,
+    });
+    const workflowId = `github-project-item:${projectItemId}:compact`;
+    const handle = await environment.client.workflow.start(ticketWorkflow, {
+      workflowId,
+      taskQueue: "thor-compact-profile",
+      args: [workflowInput(compactDelivery)],
+    });
+    const result = await worker.runUntil(handle.result());
+
+    expect(result.run.status).toBe("done");
+    expect(fake.reviewers).toHaveLength(4);
+    expect(fake.reviewers).toEqual(
+      expect.arrayContaining(["correctness", "security", "testing", "product_specification"]),
+    );
+    expect(fake.statuses).toEqual(expect.arrayContaining(["design", "active", "review", "done"]));
+    expect(fake.statuses).not.toContain("in_progress");
+    expect(result.auditTrail).toHaveLength(7);
+    expect(result.auditTrail[0]).toMatchObject({
+      agentProfile: "compact-planner",
+      harness: "codex",
+    });
+    expect(result.auditTrail[1]).toMatchObject({
+      agentProfile: "compact-builder",
+      harness: "claude",
+    });
+    expect(result.auditTrail[2]).toMatchObject({
+      agentProfile: "compact-reviewer",
+      harness: "codex",
+    });
+    expect(result.auditTrail.at(-1)).toMatchObject({
+      agentProfile: "compact-synthesizer",
+      harness: "claude",
+    });
+    await Worker.runReplayHistory({ workflowsPath }, await handle.fetchHistory(), workflowId);
+  }, 60_000);
+
+  test("accepts a conflicted transition when GitHub already reached the intended status", async () => {
+    environment = await TestWorkflowEnvironment.createTimeSkipping();
+    const fake = createActivities(policy("autonomous"));
+    const transitionProjectStatus = fake.activities.transitionProjectStatus.bind(fake.activities);
+    let injectedConflict = false;
+    fake.activities.transitionProjectStatus = async (transition) => {
+      const result = await transitionProjectStatus(transition);
+      if (!injectedConflict && transition.targetStatus === "automated_review_passed") {
+        injectedConflict = true;
+        return {
+          kind: "conflict",
+          snapshot: result.snapshot,
+          reason: "GitHub returned an eventually consistent pre-transition snapshot",
+        };
+      }
+      return result;
+    };
+    const worker = await Worker.create({
+      connection: environment.nativeConnection,
+      taskQueue: "thor-already-transitioned",
+      workflowsPath,
+      activities: fake.activities,
+    });
+    const workflowId = `github-project-item:${projectItemId}:already-transitioned`;
+    const handle = await environment.client.workflow.start(ticketWorkflow, {
+      workflowId,
+      taskQueue: "thor-already-transitioned",
+      args: [workflowInput()],
+    });
+    const result = await worker.runUntil(handle.result());
+
+    expect(injectedConflict).toBe(true);
+    expect(result.run.status).toBe("done");
+    await Worker.runReplayHistory({ workflowsPath }, await handle.fetchHistory(), workflowId);
+  }, 60_000);
+
+  test("consumes a human gate decision returned by the transition confirmation read", async () => {
+    environment = await TestWorkflowEnvironment.createTimeSkipping();
+    const fake = createActivities(policy("pre_merge_review"));
+    const transitionProjectStatus = fake.activities.transitionProjectStatus.bind(fake.activities);
+    let injectedApproval = false;
+    fake.activities.transitionProjectStatus = (transition) => {
+      if (!injectedApproval && transition.targetStatus === "awaiting_human_merge_review") {
+        injectedApproval = true;
+        return transitionProjectStatus({
+          ...transition,
+          targetStatus: "ready_to_merge",
+        });
+      }
+      return transitionProjectStatus(transition);
+    };
+    const worker = await Worker.create({
+      connection: environment.nativeConnection,
+      taskQueue: "thor-concurrent-gate-decision",
+      workflowsPath,
+      activities: fake.activities,
+    });
+    const workflowId = `github-project-item:${projectItemId}:concurrent-gate-decision`;
+    const handle = await environment.client.workflow.start(ticketWorkflow, {
+      workflowId,
+      taskQueue: "thor-concurrent-gate-decision",
+      args: [workflowInput()],
+    });
+    const result = await worker.runUntil(handle.result());
+
+    expect(injectedApproval).toBe(true);
+    expect(result.run.mergeApproval).toBe("approved");
+    expect(result.run.status).toBe("done");
     await Worker.runReplayHistory({ workflowsPath }, await handle.fetchHistory(), workflowId);
   }, 60_000);
 
@@ -98,15 +262,48 @@ describe("ticketWorkflow", () => {
         actor: "premature-reviewer",
       });
       await waitForStatus(() => handle.query(ticketStateQuery), "awaiting_blueprint_approval");
-      await handle.signal(blueprintDecisionSignal, {
-        decision: "approved",
-        actor: "octocat",
+      await waitForProjectStatus(
+        () => handle.query(ticketStateQuery),
+        "awaiting_blueprint_approval",
+      );
+      const blueprintSnapshot = (await handle.query(ticketStateQuery)).latestProjectSnapshot;
+      if (blueprintSnapshot === undefined) throw new Error("missing blueprint Project snapshot");
+      await handle.signal(projectChangedSignal, {
+        kind: "present",
+        snapshot: {
+          ...blueprintSnapshot,
+          status: "ready",
+        },
+        reason: "GitHub blueprint approval by octocat",
       });
       await waitForStatus(() => handle.query(ticketStateQuery), "automated_review_passed");
+      await waitForProjectStatus(
+        () => handle.query(ticketStateQuery),
+        "awaiting_human_merge_review",
+      );
       expect((await handle.query(ticketStateQuery)).run?.mergeApproval).toBe("pending");
-      await handle.signal(mergeDecisionSignal, {
-        decision: "approved",
-        actor: "octocat",
+      const mergeSnapshot = (await handle.query(ticketStateQuery)).latestProjectSnapshot;
+      if (mergeSnapshot === undefined) throw new Error("missing merge Project snapshot");
+      const echoedAt = String(Number(mergeSnapshot.updatedAt) + 1);
+      await handle.signal(projectChangedSignal, {
+        kind: "present",
+        snapshot: {
+          ...mergeSnapshot,
+          updatedAt: echoedAt,
+        },
+        reason: "delayed poll echo of Thor's merge gate",
+      });
+      await waitForProjectUpdatedAt(() => handle.query(ticketStateQuery), echoedAt);
+      expect((await handle.query(ticketStateQuery)).run?.status).toBe("automated_review_passed");
+      const echoedSnapshot = (await handle.query(ticketStateQuery)).latestProjectSnapshot;
+      if (echoedSnapshot === undefined) throw new Error("missing echoed merge Project snapshot");
+      await handle.signal(projectChangedSignal, {
+        kind: "present",
+        snapshot: {
+          ...echoedSnapshot,
+          status: "ready_to_merge",
+        },
+        reason: "GitHub merge approval by octocat",
       });
       result = await handle.result();
     } finally {
@@ -204,7 +401,7 @@ describe("ticketWorkflow", () => {
             ]
           : [];
       return Promise.resolve(
-        audited(input.executionId, input.harness, "synthesis", {
+        audited(input, "synthesis", {
           reviewRunId: input.reviewRunId,
           findings,
           failureScope: "repair" as const,
@@ -214,7 +411,7 @@ describe("ticketWorkflow", () => {
     };
     fake.activities.repair = (input) =>
       Promise.resolve(
-        audited(input.executionId, input.harness, "repair", {
+        audited(input, "repair", {
           commitSha: "repaired-commit-sha",
           repairedFindings: input.findingIds,
           changedFiles: ["src/index.ts"],
@@ -246,7 +443,11 @@ describe("ticketWorkflow", () => {
   test("blocks instead of overwriting an unexpected human Project transition", async () => {
     environment = await TestWorkflowEnvironment.createTimeSkipping();
     const fake = createActivities(policy("autonomous"));
-    fake.activities.createBlueprint = async (): Promise<never> => {
+    const createBlueprint = fake.activities.createBlueprint.bind(fake.activities);
+    let attempts = 0;
+    fake.activities.createBlueprint = async (input) => {
+      attempts += 1;
+      if (attempts > 1) return createBlueprint(input);
       const context = Context.current();
       const heartbeatTimer = setInterval(() => context.heartbeat({ phase: "authority_test" }), 10);
       try {
@@ -270,14 +471,466 @@ describe("ticketWorkflow", () => {
     const workerRun = worker.run();
     try {
       await waitForActiveExecution(() => handle.query(ticketStateQuery));
-      const snapshot = await fake.activities.loadProjectItem(projectItemId);
+      const snapshot = fake.humanChange({ status: "done" });
       await handle.signal(projectChangedSignal, {
-        snapshot: { ...snapshot, status: "done", updatedAt: "human-version" },
+        kind: "present",
+        snapshot,
         reason: "human moved the item",
       });
       await waitForStatus(() => handle.query(ticketStateQuery), "blocked");
       expect(fake.statuses).toContain("blocked");
-      await handle.signal(cancelTicketSignal, { actor: "octocat", reason: "test cleanup" });
+      await handle.signal(projectChangedSignal, {
+        kind: "present",
+        snapshot: fake.humanChange({ status: "design_blueprint" }),
+        reason: "human restored the suspended blueprint phase",
+      });
+      const result = await handle.result();
+      expect(result.run.status).toBe("done");
+      expect(attempts).toBe(2);
+      await Worker.runReplayHistory(
+        { workflowsPath },
+        await handle.fetchHistory(),
+        handle.workflowId,
+      );
+    } finally {
+      worker.shutdown();
+      await workerRun;
+    }
+  }, 60_000);
+
+  test("cancels in-flight implementation, replans edited ticket intent, and completes", async () => {
+    environment = await TestWorkflowEnvironment.createTimeSkipping();
+    const fake = createActivities(policy("autonomous"));
+    const implement = fake.activities.implement.bind(fake.activities);
+    let implementationAttempts = 0;
+    fake.activities.implement = async (input) => {
+      implementationAttempts += 1;
+      if (implementationAttempts > 1) return implement(input);
+      const context = Context.current();
+      const heartbeatTimer = setInterval(() => context.heartbeat({ phase: "intent_edit" }), 10);
+      try {
+        return await context.cancelled;
+      } finally {
+        clearInterval(heartbeatTimer);
+      }
+    };
+    const worker = await Worker.create({
+      connection: environment.nativeConnection,
+      taskQueue: "thor-intent-edit-recovery",
+      workflowsPath,
+      activities: fake.activities,
+      maxHeartbeatThrottleInterval: "10ms",
+    });
+    const workflowId = `github-project-item:${projectItemId}:intent-edit-recovery`;
+    const handle = await environment.client.workflow.start(ticketWorkflow, {
+      workflowId,
+      taskQueue: "thor-intent-edit-recovery",
+      args: [workflowInput()],
+    });
+    const workerRun = worker.run();
+    try {
+      await waitForStatus(() => handle.query(ticketStateQuery), "in_progress");
+      await waitForActiveExecution(() => handle.query(ticketStateQuery));
+      const edited = fake.humanChange({
+        ticket: (ticket) => ({
+          ...ticket,
+          body: "Ship the revised human-authored behavior",
+          acceptanceCriteria: ["The revised workflow completes"],
+        }),
+      });
+      await handle.signal(projectChangedSignal, {
+        kind: "present",
+        snapshot: edited,
+        reason: "human edited ticket intent during implementation",
+      });
+      const blocked = await waitForStatusResult(() => handle.query(ticketStateQuery), "blocked");
+      expect(blocked.run?.suspendedStatus).toBe("design_blueprint");
+      await waitForNoActiveExecution(() => handle.query(ticketStateQuery));
+      await handle.signal(projectChangedSignal, {
+        kind: "present",
+        snapshot: fake.humanChange({ status: "design_blueprint" }),
+        reason: "human accepted replanning",
+      });
+      const result = await handle.result();
+      expect(result.run.status).toBe("done");
+      expect(result.run.ticket.body).toBe("Ship the revised human-authored behavior");
+      expect(fake.blueprintExecutions).toBe(2);
+      expect(implementationAttempts).toBe(2);
+      await Worker.runReplayHistory({ workflowsPath }, await handle.fetchHistory(), workflowId);
+    } finally {
+      worker.shutdown();
+      await workerRun;
+    }
+  }, 60_000);
+
+  test("blocks on a dependency regression, replans after recovery, and completes", async () => {
+    environment = await TestWorkflowEnvironment.createTimeSkipping();
+    const fake = createActivities(policy("autonomous"));
+    const implement = fake.activities.implement.bind(fake.activities);
+    let implementationAttempts = 0;
+    fake.activities.implement = async (input) => {
+      implementationAttempts += 1;
+      if (implementationAttempts > 1) return implement(input);
+      return cancellableActivity("dependency_replan");
+    };
+    const worker = await Worker.create({
+      connection: environment.nativeConnection,
+      taskQueue: "thor-dependency-replan",
+      workflowsPath,
+      activities: fake.activities,
+      maxHeartbeatThrottleInterval: "10ms",
+    });
+    const workflowId = `github-project-item:${projectItemId}:dependency-replan`;
+    const handle = await environment.client.workflow.start(ticketWorkflow, {
+      workflowId,
+      taskQueue: "thor-dependency-replan",
+      args: [workflowInput()],
+    });
+    const workerRun = worker.run();
+    try {
+      await waitForStatus(() => handle.query(ticketStateQuery), "in_progress");
+      await waitForActiveExecution(() => handle.query(ticketStateQuery));
+      await handle.signal(projectChangedSignal, {
+        kind: "present",
+        snapshot: fake.humanChange({
+          ticket: (ticket) => ({
+            ...ticket,
+            dependencies: [{ issueId: "I_dependency", complete: false }],
+          }),
+        }),
+        reason: "a referenced dependency was reopened",
+      });
+      await waitForStatus(() => handle.query(ticketStateQuery), "blocked");
+      await handle.signal(projectChangedSignal, {
+        kind: "present",
+        snapshot: fake.humanChange({
+          ticket: (ticket) => ({
+            ...ticket,
+            dependencies: [{ issueId: "I_dependency", complete: true }],
+          }),
+        }),
+        reason: "the referenced dependency was completed again",
+      });
+      await handle.signal(projectChangedSignal, {
+        kind: "present",
+        snapshot: fake.humanChange({ status: "design_blueprint" }),
+        reason: "human cleared the dependency block",
+      });
+      const result = await handle.result();
+      expect(result.run.status).toBe("done");
+      expect(result.run.ticket.dependencies).toEqual([{ issueId: "I_dependency", complete: true }]);
+      expect(fake.blueprintExecutions).toBe(2);
+      expect(implementationAttempts).toBe(2);
+      await Worker.runReplayHistory({ workflowsPath }, await handle.fetchHistory(), workflowId);
+    } finally {
+      worker.shutdown();
+      await workerRun;
+    }
+  }, 60_000);
+
+  test("does not resume while a human-authored execution policy disables agents", async () => {
+    environment = await TestWorkflowEnvironment.createTimeSkipping();
+    const fake = createActivities(policy("autonomous"));
+    const implement = fake.activities.implement.bind(fake.activities);
+    let implementationAttempts = 0;
+    fake.activities.implement = async (input) => {
+      implementationAttempts += 1;
+      if (implementationAttempts > 1) return implement(input);
+      return cancellableActivity("policy_change");
+    };
+    const worker = await Worker.create({
+      connection: environment.nativeConnection,
+      taskQueue: "thor-policy-change",
+      workflowsPath,
+      activities: fake.activities,
+      maxHeartbeatThrottleInterval: "10ms",
+    });
+    const workflowId = `github-project-item:${projectItemId}:policy-change`;
+    const handle = await environment.client.workflow.start(ticketWorkflow, {
+      workflowId,
+      taskQueue: "thor-policy-change",
+      args: [workflowInput()],
+    });
+    const workerRun = worker.run();
+    try {
+      await waitForStatus(() => handle.query(ticketStateQuery), "in_progress");
+      await waitForActiveExecution(() => handle.query(ticketStateQuery));
+      await handle.signal(projectChangedSignal, {
+        kind: "present",
+        snapshot: fake.humanChange({
+          ticket: (ticket) => ({
+            ...ticket,
+            policy: { ...ticket.policy, executionMode: "human" },
+          }),
+        }),
+        reason: "human took ownership of the ticket",
+      });
+      await waitForStatus(() => handle.query(ticketStateQuery), "blocked");
+      await handle.signal(projectChangedSignal, {
+        kind: "present",
+        snapshot: fake.humanChange({ status: "design_blueprint" }),
+        reason: "attempted resume while agents remain disabled",
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect((await handle.query(ticketStateQuery)).run?.status).toBe("blocked");
+
+      const restored = fake.humanChange({
+        ticket: (ticket) => ({
+          ...ticket,
+          policy: { ...ticket.policy, executionMode: "agent" },
+        }),
+      });
+      await handle.signal(projectChangedSignal, {
+        kind: "present",
+        snapshot: restored,
+        reason: "human returned execution to Thor",
+      });
+      await handle.signal(projectChangedSignal, {
+        kind: "present",
+        snapshot: fake.humanChange({ status: "design_blueprint" }),
+        reason: "human resumed after restoring agent policy",
+      });
+      const result = await handle.result();
+      expect(result.run.status).toBe("done");
+      expect(result.run.ticket.policy.executionMode).toBe("agent");
+      expect(fake.blueprintExecutions).toBe(2);
+      await Worker.runReplayHistory({ workflowsPath }, await handle.fetchHistory(), workflowId);
+    } finally {
+      worker.shutdown();
+      await workerRun;
+    }
+  }, 60_000);
+
+  test("uses the configured dependency resume policy without rerunning blueprint", async () => {
+    environment = await TestWorkflowEnvironment.createTimeSkipping();
+    const fake = createActivities(policy("autonomous"), "design");
+    const implement = fake.activities.implement.bind(fake.activities);
+    let implementationAttempts = 0;
+    fake.activities.implement = async (input) => {
+      implementationAttempts += 1;
+      if (implementationAttempts > 1) return implement(input);
+      return cancellableActivity("dependency_resume");
+    };
+    const worker = await Worker.create({
+      connection: environment.nativeConnection,
+      taskQueue: "thor-dependency-resume",
+      workflowsPath,
+      activities: fake.activities,
+      maxHeartbeatThrottleInterval: "10ms",
+    });
+    const workflowId = `github-project-item:${projectItemId}:dependency-resume`;
+    const handle = await environment.client.workflow.start(ticketWorkflow, {
+      workflowId,
+      taskQueue: "thor-dependency-resume",
+      args: [workflowInput(compactDelivery)],
+    });
+    const workerRun = worker.run();
+    try {
+      await waitForStatus(() => handle.query(ticketStateQuery), "in_progress");
+      await waitForActiveExecution(() => handle.query(ticketStateQuery));
+      await handle.signal(projectChangedSignal, {
+        kind: "present",
+        snapshot: fake.humanChange({
+          ticket: (ticket) => ({
+            ...ticket,
+            dependencies: [{ issueId: "I_dependency", complete: false }],
+          }),
+        }),
+      });
+      const blocked = await waitForStatusResult(() => handle.query(ticketStateQuery), "blocked");
+      expect(blocked.run?.suspendedStatus).toBe("in_progress");
+      await handle.signal(projectChangedSignal, {
+        kind: "present",
+        snapshot: fake.humanChange({
+          ticket: (ticket) => ({
+            ...ticket,
+            dependencies: [{ issueId: "I_dependency", complete: true }],
+          }),
+        }),
+      });
+      await handle.signal(projectChangedSignal, {
+        kind: "present",
+        snapshot: fake.humanChange({ status: "active" }),
+        reason: "human resumed the suspended implementation",
+      });
+      const result = await handle.result();
+      expect(result.run.status).toBe("done");
+      expect(fake.blueprintExecutions).toBe(1);
+      expect(implementationAttempts).toBe(2);
+      await Worker.runReplayHistory({ workflowsPath }, await handle.fetchHistory(), workflowId);
+    } finally {
+      worker.shutdown();
+      await workerRun;
+    }
+  }, 60_000);
+
+  test("blocks on an unreadable item and resumes from a recovered authoritative snapshot", async () => {
+    environment = await TestWorkflowEnvironment.createTimeSkipping();
+    const fake = createActivities(policy("autonomous"));
+    const createBlueprint = fake.activities.createBlueprint.bind(fake.activities);
+    let attempts = 0;
+    fake.activities.createBlueprint = async (input) => {
+      attempts += 1;
+      if (attempts > 1) return createBlueprint(input);
+      return cancellableActivity("unreadable_recovery");
+    };
+    const worker = await Worker.create({
+      connection: environment.nativeConnection,
+      taskQueue: "thor-unreadable-recovery",
+      workflowsPath,
+      activities: fake.activities,
+      maxHeartbeatThrottleInterval: "10ms",
+    });
+    const workflowId = `github-project-item:${projectItemId}:unreadable-recovery`;
+    const handle = await environment.client.workflow.start(ticketWorkflow, {
+      workflowId,
+      taskQueue: "thor-unreadable-recovery",
+      args: [workflowInput()],
+    });
+    const workerRun = worker.run();
+    try {
+      await waitForActiveExecution(() => handle.query(ticketStateQuery));
+      await handle.signal(projectChangedSignal, {
+        kind: "unreadable",
+        projectItemId,
+        reason: "GitHub returned malformed content",
+      });
+      const blocked = await waitForStatusResult(() => handle.query(ticketStateQuery), "blocked");
+      expect(blocked.projectItemAvailability).toBe("unreadable");
+      await handle.signal(projectChangedSignal, {
+        kind: "present",
+        snapshot: await fake.activities.loadProjectItem(projectItemId),
+        reason: "GitHub item became readable again",
+      });
+      const result = await handle.result();
+      expect(result.run.status).toBe("done");
+      expect(attempts).toBe(2);
+      await Worker.runReplayHistory({ workflowsPath }, await handle.fetchHistory(), workflowId);
+    } finally {
+      worker.shutdown();
+      await workerRun;
+    }
+  }, 60_000);
+
+  test("terminates as orphaned when the active Project item is removed", async () => {
+    environment = await TestWorkflowEnvironment.createTimeSkipping();
+    const fake = createActivities(policy("autonomous"));
+    fake.activities.createBlueprint = () => cancellableActivity("item_removal");
+    const worker = await Worker.create({
+      connection: environment.nativeConnection,
+      taskQueue: "thor-item-removal",
+      workflowsPath,
+      activities: fake.activities,
+      maxHeartbeatThrottleInterval: "10ms",
+    });
+    const workflowId = `github-project-item:${projectItemId}:item-removal`;
+    const handle = await environment.client.workflow.start(ticketWorkflow, {
+      workflowId,
+      taskQueue: "thor-item-removal",
+      args: [workflowInput()],
+    });
+    const workerRun = worker.run();
+    try {
+      await waitForActiveExecution(() => handle.query(ticketStateQuery));
+      await handle.signal(projectChangedSignal, {
+        kind: "removed",
+        projectItemId,
+        reason: "human removed the item from the managed Project",
+      });
+      const result = await handle.result();
+      expect(result.run.status).toBe("orphaned");
+      expect(result.run.externalReason).toContain("removed");
+      expect(result.auditTrail).toEqual([]);
+      await Worker.runReplayHistory({ workflowsPath }, await handle.fetchHistory(), workflowId);
+    } finally {
+      worker.shutdown();
+      await workerRun;
+    }
+  }, 60_000);
+
+  test("does not reclassify a completed delivery when a late removal signal arrives", async () => {
+    environment = await TestWorkflowEnvironment.createTimeSkipping();
+    const fake = createActivities(policy("autonomous"));
+    let notifySummaryStarted: (() => void) | undefined;
+    let releaseSummary: (() => void) | undefined;
+    const summaryStarted = new Promise<void>((resolve) => {
+      notifySummaryStarted = resolve;
+    });
+    const summaryReleased = new Promise<void>((resolve) => {
+      releaseSummary = resolve;
+    });
+    fake.activities.publishRunSummary = async () => {
+      notifySummaryStarted?.();
+      await summaryReleased;
+    };
+    const worker = await Worker.create({
+      connection: environment.nativeConnection,
+      taskQueue: "thor-late-removal",
+      workflowsPath,
+      activities: fake.activities,
+    });
+    const workflowId = `github-project-item:${projectItemId}:late-removal`;
+    const handle = await environment.client.workflow.start(ticketWorkflow, {
+      workflowId,
+      taskQueue: "thor-late-removal",
+      args: [workflowInput()],
+    });
+    const workerRun = worker.run();
+    try {
+      await summaryStarted;
+      await handle.signal(projectChangedSignal, {
+        kind: "removed",
+        projectItemId,
+        reason: "Project automation removed the completed item",
+      });
+      releaseSummary?.();
+      const result = await handle.result();
+      expect(result.run.status).toBe("done");
+      await Worker.runReplayHistory({ workflowsPath }, await handle.fetchHistory(), workflowId);
+    } finally {
+      releaseSummary?.();
+      worker.shutdown();
+      await workerRun;
+    }
+  }, 60_000);
+
+  test("ignores a stale polling snapshot after loading newer Project state", async () => {
+    environment = await TestWorkflowEnvironment.createTimeSkipping();
+    const fake = createActivities(policy("autonomous"));
+    fake.activities.createBlueprint = async (): Promise<never> => {
+      const context = Context.current();
+      const heartbeatTimer = setInterval(() => context.heartbeat({ phase: "stale_poll_test" }), 10);
+      try {
+        return await context.cancelled;
+      } finally {
+        clearInterval(heartbeatTimer);
+      }
+    };
+    const worker = await Worker.create({
+      connection: environment.nativeConnection,
+      taskQueue: "thor-stale-poll",
+      workflowsPath,
+      activities: fake.activities,
+      maxHeartbeatThrottleInterval: "10ms",
+    });
+    const handle = await environment.client.workflow.start(ticketWorkflow, {
+      workflowId: `github-project-item:${projectItemId}:stale-poll`,
+      taskQueue: "thor-stale-poll",
+      args: [workflowInput()],
+    });
+    const workerRun = worker.run();
+    try {
+      await waitForActiveExecution(() => handle.query(ticketStateQuery));
+      const snapshot = await fake.activities.loadProjectItem(projectItemId);
+      await handle.signal(projectChangedSignal, {
+        kind: "present",
+        snapshot: { ...snapshot, status: "done" },
+        reason: "delayed polling result",
+      });
+      const state = await handle.query(ticketStateQuery);
+      expect(state.run?.status).toBe("design_blueprint");
+      expect(state.activeExecutionIds).toHaveLength(1);
+      await handle.signal(cancelTicketSignal, { actor: "test", reason: "test cleanup" });
       expect((await handle.result()).run.status).toBe("cancelled");
     } finally {
       worker.shutdown();
@@ -327,21 +980,31 @@ describe("ticketWorkflow", () => {
   }, 60_000);
 });
 
-function createActivities(ticketPolicy: TicketPolicy): {
+function createActivities(
+  ticketPolicy: TicketPolicy,
+  initialStatus: BoardStateKey = "design_blueprint",
+): {
   activities: TicketActivities;
   statuses: string[];
+  events: string[];
   reviewers: string[];
   summaryPublished: boolean;
   blueprintExecutions: number;
   blueprintPublished: boolean;
+  humanChange(input: {
+    status?: BoardStateKey;
+    ticket?: (ticket: TicketContext) => TicketContext;
+  }): Awaited<ReturnType<TicketActivities["loadProjectItem"]>>;
 } {
-  let status: TicketStatus = "design_blueprint";
+  let status: BoardStateKey = initialStatus;
   let version = 1;
   const statuses: string[] = [status];
+  const events: string[] = [];
   const reviewers: string[] = [];
   const holder = { summaryPublished: false, blueprintExecutions: 0, blueprintPublished: false };
-  const ticket = {
+  let ticket: TicketContext = {
     projectItemId,
+    issueId: issueIdSchema.parse("I_test_42"),
     repository: { owner: "example", name: "repository" },
     issueNumber: 42,
     title: "Implement durable delivery",
@@ -365,12 +1028,13 @@ function createActivities(ticketPolicy: TicketPolicy): {
       status = transition.targetStatus;
       version += 1;
       statuses.push(status);
+      events.push(`status:${status}`);
       return Promise.resolve({ kind: "updated", snapshot: snapshot() });
     },
     createBlueprint: (input) => {
       holder.blueprintExecutions += 1;
       return Promise.resolve(
-        audited(input.executionId, input.harness, "blueprint", {
+        audited(input, "blueprint", {
           objective: "Implement durable delivery",
           constraints: [],
           architecture: "Use deterministic workflow orchestration",
@@ -391,7 +1055,7 @@ function createActivities(ticketPolicy: TicketPolicy): {
     },
     implement: (input) =>
       Promise.resolve(
-        audited(input.executionId, input.harness, "implementation", {
+        audited(input, "implementation", {
           branch: "thor/test",
           commitSha: "commit-sha",
           pullRequestNumber: 7,
@@ -403,7 +1067,7 @@ function createActivities(ticketPolicy: TicketPolicy): {
     review: (input) => {
       reviewers.push(input.reviewer);
       return Promise.resolve(
-        audited(input.executionId, input.harness, "review", {
+        audited(input, "review", {
           reviewRunId: input.reviewRunId,
           reviewer: input.reviewer,
           findings: [],
@@ -413,7 +1077,7 @@ function createActivities(ticketPolicy: TicketPolicy): {
     },
     synthesize: (input) =>
       Promise.resolve(
-        audited(input.executionId, input.harness, "synthesis", {
+        audited(input, "synthesis", {
           reviewRunId: input.reviewRunId,
           findings: [],
           failureScope: "repair",
@@ -425,8 +1089,16 @@ function createActivities(ticketPolicy: TicketPolicy): {
       Promise.reject(new Error("no findings should be deferred in the happy path")),
     getMergeReadiness: () =>
       Promise.resolve({ mergeable: true, headSha: "commit-sha", merged: false }),
-    merge: () => Promise.resolve("merge-sha"),
+    merge: () => {
+      events.push("merge");
+      return Promise.resolve("merge-sha");
+    },
+    closeSourceIssue: () => {
+      events.push("close-issue");
+      return Promise.resolve();
+    },
     publishRunSummary: () => {
+      events.push("summary");
       holder.summaryPublished = true;
       return Promise.resolve();
     },
@@ -434,6 +1106,7 @@ function createActivities(ticketPolicy: TicketPolicy): {
   return {
     activities,
     statuses,
+    events,
     reviewers,
     get summaryPublished() {
       return holder.summaryPublished;
@@ -444,18 +1117,27 @@ function createActivities(ticketPolicy: TicketPolicy): {
     get blueprintPublished() {
       return holder.blueprintPublished;
     },
+    humanChange(input) {
+      if (input.status !== undefined) status = input.status;
+      if (input.ticket !== undefined) ticket = input.ticket(structuredClone(ticket));
+      version += 1;
+      return snapshot();
+    },
   };
 }
 
 function audited<Value>(
-  executionId: ExecutionId,
-  harness: HarnessKind,
+  input: AgentActivityContext & { executionId: ExecutionId },
   purpose: string,
   value: Value,
 ): Audited<Value> {
   const audit: ExecutionAuditRecord = {
-    executionId,
-    harness,
+    executionId: input.executionId,
+    declarationDigest: input.declarationDigest,
+    workflowProfile: input.workflowProfile,
+    agentProfile: input.agent.id,
+    agentProfileDigest: input.agent.digest,
+    harness: input.agent.harness,
     purpose,
     packageDigest: "a".repeat(64),
     promptDigest: "b".repeat(64),
@@ -477,8 +1159,8 @@ function policy(approvalPolicy: TicketPolicy["approvalPolicy"]): TicketPolicy {
   };
 }
 
-function workflowInput(): TicketWorkflowInput {
-  return { projectItemId, baseBranch: "main" };
+function workflowInput(delivery = defaultDelivery): TicketWorkflowInput {
+  return { projectItemId, baseBranch: "main", delivery };
 }
 
 async function waitForStatus(
@@ -505,6 +1187,22 @@ async function waitForStatus(
   );
 }
 
+async function waitForStatusResult(
+  query: () => Promise<{
+    run?: { status: string; suspendedStatus?: string };
+    projectItemAvailability: "present" | "unreadable" | "removed";
+    activeExecutionIds: string[];
+  }>,
+  expected: string,
+): Promise<Awaited<ReturnType<typeof query>>> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const state = await query();
+    if (state.run?.status === expected) return state;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`workflow did not reach ${expected}`);
+}
+
 async function waitForActiveExecution(
   query: () => Promise<{ activeExecutionIds: string[] }>,
 ): Promise<void> {
@@ -513,4 +1211,46 @@ async function waitForActiveExecution(
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error("workflow did not start an agent execution");
+}
+
+async function waitForNoActiveExecution(
+  query: () => Promise<{ activeExecutionIds: string[] }>,
+): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if ((await query()).activeExecutionIds.length === 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("workflow did not cancel the active agent execution");
+}
+
+async function waitForProjectStatus(
+  query: () => Promise<{ latestProjectSnapshot?: { status: string } }>,
+  expected: string,
+): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if ((await query()).latestProjectSnapshot?.status === expected) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Workflow Project snapshot did not reach ${expected}`);
+}
+
+async function waitForProjectUpdatedAt(
+  query: () => Promise<{ latestProjectSnapshot?: { updatedAt: string } }>,
+  expected: string,
+): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if ((await query()).latestProjectSnapshot?.updatedAt === expected) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Workflow Project snapshot did not reach updatedAt ${expected}`);
+}
+
+async function cancellableActivity(phase: string): Promise<never> {
+  const context = Context.current();
+  const heartbeatTimer = setInterval(() => context.heartbeat({ phase }), 10);
+  try {
+    return await context.cancelled;
+  } finally {
+    clearInterval(heartbeatTimer);
+  }
 }

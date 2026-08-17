@@ -5,6 +5,7 @@ import {
   executionIdSchema,
   findingIdSchema,
   projectItemIdSchema,
+  issueIdSchema,
   reviewRunIdSchema,
 } from "./ids.js";
 
@@ -27,9 +28,16 @@ export const ticketStatuses = [
   "done",
   "blocked",
   "cancelled",
+  "orphaned",
 ] as const;
 export const ticketStatusSchema = z.enum(ticketStatuses);
 export type TicketStatus = z.infer<typeof ticketStatusSchema>;
+
+export const projectableTicketStatuses = ticketStatuses.filter(
+  (status): status is Exclude<TicketStatus, "orphaned"> => status !== "orphaned",
+);
+export const projectableTicketStatusSchema = z.enum(projectableTicketStatuses);
+export type ProjectableTicketStatus = z.infer<typeof projectableTicketStatusSchema>;
 
 export const workTypeSchema = z.enum(["feature", "bug", "task", "spike", "chore", "documentation"]);
 export type WorkType = z.infer<typeof workTypeSchema>;
@@ -85,6 +93,7 @@ export type Dependency = z.infer<typeof dependencySchema>;
 
 export const ticketContextSchema = z.object({
   projectItemId: projectItemIdSchema,
+  issueId: issueIdSchema,
   repository: repositoryRefSchema,
   issueNumber: z.number().int().positive(),
   title: z.string().trim().min(1),
@@ -97,6 +106,77 @@ export const ticketContextSchema = z.object({
   policy: ticketPolicySchema,
 });
 export type TicketContext = z.infer<typeof ticketContextSchema>;
+
+export const ticketContextChangeKinds = [
+  "none",
+  "identity",
+  "intent",
+  "dependencies",
+  "policy",
+] as const;
+export type TicketContextChangeKind = (typeof ticketContextChangeKinds)[number];
+
+/**
+ * Compares execution-relevant ticket intent without depending on object insertion order or the
+ * order returned by GitHub's dependency connection.
+ */
+export function classifyTicketContextChange(
+  current: TicketContext,
+  incoming: TicketContext,
+): TicketContextChangeKind {
+  if (
+    current.projectItemId !== incoming.projectItemId ||
+    current.issueId !== incoming.issueId ||
+    current.issueNumber !== incoming.issueNumber ||
+    current.repository.owner !== incoming.repository.owner ||
+    current.repository.name !== incoming.repository.name
+  ) {
+    return "identity";
+  }
+  if (
+    stableJson({
+      title: current.title,
+      body: current.body,
+      workType: current.workType,
+      priority: current.priority,
+      component: current.component,
+      acceptanceCriteria: current.acceptanceCriteria,
+    }) !==
+    stableJson({
+      title: incoming.title,
+      body: incoming.body,
+      workType: incoming.workType,
+      priority: incoming.priority,
+      component: incoming.component,
+      acceptanceCriteria: incoming.acceptanceCriteria,
+    })
+  ) {
+    return "intent";
+  }
+  // Ticket intent and policy both use the safer ticket-change policy. Check them before
+  // dependencies so a simultaneous dependency edit cannot downgrade a required replan to the
+  // dependency-only `resume` behavior.
+  if (stableJson(current.policy) !== stableJson(incoming.policy)) return "policy";
+  if (stableJson(normalizeDependencies(current)) !== stableJson(normalizeDependencies(incoming))) {
+    return "dependencies";
+  }
+  return "none";
+}
+
+export function ticketContextsEqual(current: TicketContext, incoming: TicketContext): boolean {
+  return classifyTicketContextChange(current, incoming) === "none";
+}
+
+function normalizeDependencies(ticket: TicketContext): TicketContext["dependencies"] {
+  return [...ticket.dependencies].sort(
+    (left, right) =>
+      left.issueId.localeCompare(right.issueId) || Number(left.complete) - Number(right.complete),
+  );
+}
+
+function stableJson(value: unknown): string {
+  return JSON.stringify(value);
+}
 
 export const blueprintSchema = z.object({
   objective: z.string().trim().min(1),
@@ -151,6 +231,8 @@ export type SkillRef = z.infer<typeof skillRefSchema>;
 
 export const executionPackageSchema = z.object({
   executionId: executionIdSchema,
+  agentProfile: z.string().trim().min(1),
+  agentProfileDigest: z.string().regex(/^[a-f0-9]{64}$/),
   harness: harnessKindSchema,
   purpose: executionPurposeSchema,
   prompt: z.string().min(1),

@@ -5,9 +5,11 @@ import { ClaudeHarness, CodexHarness, ExecutionPackageBuilder, HarnessRouter } f
 import {
   createGitHubGateway,
   createWorkerConnection,
+  isRetryableGitHubFailure,
   loadRuntimeConfiguration,
   log,
   mapDeferredProjectFields,
+  retryInfrastructureOperation,
 } from "@thor/runtime";
 import { createTicketActivities, GitWorkspaceManager } from "@thor/workflows";
 
@@ -16,7 +18,18 @@ const workflowsPath = fileURLToPath(
 );
 
 async function main(): Promise<void> {
-  const configuration = await loadRuntimeConfiguration();
+  const shutdown = shutdownSignal();
+  const configuration = await retryInfrastructureOperation(() => loadRuntimeConfiguration(), {
+    signal: shutdown.signal,
+    shouldRetry: isRetryableGitHubFailure,
+    onFailedAttempt: ({ error, attemptNumber, retryDelay }) => {
+      log("warn", "worker_configuration_load_failed", {
+        attempt: attemptNumber,
+        retryDelayMs: retryDelay,
+        error: error.message,
+      });
+    },
+  });
   const github = createGitHubGateway(configuration);
   const harnesses = new HarnessRouter();
   harnesses.register(new ClaudeHarness());
@@ -30,7 +43,7 @@ async function main(): Promise<void> {
       worktreeRoot: configuration.paths.worktreeRoot,
     }),
     deferredProjectFields: (finding, ticket) =>
-      mapDeferredProjectFields(configuration.github.deferredFields, finding, ticket),
+      mapDeferredProjectFields(configuration.binding, finding, ticket),
   });
   const connection = await createWorkerConnection(configuration);
   try {
@@ -50,6 +63,14 @@ async function main(): Promise<void> {
   } finally {
     await connection.close();
   }
+}
+
+function shutdownSignal(): AbortController {
+  const controller = new AbortController();
+  const shutdown = (): void => controller.abort(new Error("worker shutdown requested"));
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
+  return controller;
 }
 
 main().catch((error: unknown) => {

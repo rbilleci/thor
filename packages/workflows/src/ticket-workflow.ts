@@ -8,10 +8,18 @@ import {
   sleep,
   isCancellation,
 } from "@temporalio/workflow";
+import type {
+  AgentProfileSnapshot,
+  BoardProjection,
+  InterventionPolicy,
+  RuntimeDeliveryProfile,
+  WorkflowAgentRoles,
+} from "@thor/config/schema";
 import {
   applyHumanStatus,
   approveDeferrals,
   completeMerge,
+  classifyTicketContextChange,
   createTicketRun,
   decideBlueprint,
   decideMerge,
@@ -19,6 +27,8 @@ import {
   finishDeferralMaterialization,
   mergeGateInput,
   nextAction,
+  orphanTicket,
+  policyAllowsAgent,
   recordBlueprint,
   recordImplementation,
   recordMaterializedDeferral,
@@ -27,16 +37,17 @@ import {
   startImplementation,
   startMerge,
   startReview,
+  ticketContextsEqual,
   type ExecutionId,
   type Blueprint,
   type TicketRun,
+  type TicketContextChangeKind,
   type TicketStatus,
 } from "@thor/domain";
 import type { ProjectItemSnapshot } from "@thor/github";
 
 import {
   approvalDecisionEventSchema,
-  harnessRoutingSchema,
   operatorEventSchema,
   projectChangeEventSchema,
   ticketWorkflowInputSchema,
@@ -59,15 +70,15 @@ const githubActivities = proxyActivities<
     | "materializeDeferredFinding"
     | "getMergeReadiness"
     | "merge"
+    | "closeSourceIssue"
     | "publishRunSummary"
   >
 >({
-  startToCloseTimeout: "2 minutes",
+  startToCloseTimeout: "10 minutes",
   retry: {
     initialInterval: "1 second",
     backoffCoefficient: 2,
-    maximumInterval: "30 seconds",
-    maximumAttempts: 8,
+    maximumInterval: "5 minutes",
     nonRetryableErrorTypes: [
       "github_authentication",
       "github_conflict",
@@ -107,12 +118,14 @@ export const ticketStateQuery = defineQuery<TicketWorkflowState>("ticketState");
 
 export async function ticketWorkflow(rawInput: TicketWorkflowInput): Promise<TicketWorkflowResult> {
   const input = ticketWorkflowInputSchema.parse(rawInput);
-  const harnesses = harnessRoutingSchema.parse(input.harnesses);
+  const delivery = input.delivery;
   const auditTrail: ExecutionAuditRecord[] = [];
   const queryState: { run?: TicketRun } = {};
   let latestProjectSnapshot: ProjectItemSnapshot | undefined;
+  let projectItemAvailability: "present" | "unreadable" | "removed" = "present";
   const activeExecutionIds = new Set<ExecutionId>();
   const activeScopes = new Set<CancellationScope>();
+  const interventionCancelledScopes = new Set<CancellationScope>();
   let executionSequence = 0;
   const queuedProjectChanges: ProjectChangeEvent[] = [];
   const queuedBlueprintDecisions: ApprovalDecisionEvent[] = [];
@@ -122,25 +135,57 @@ export async function ticketWorkflow(rawInput: TicketWorkflowInput): Promise<Tic
   setHandler(ticketStateQuery, () => ({
     ...(queryState.run === undefined ? {} : { run: queryState.run }),
     ...(latestProjectSnapshot === undefined ? {} : { latestProjectSnapshot }),
+    projectItemAvailability,
     auditTrail: [...auditTrail],
     activeExecutionIds: [...activeExecutionIds].sort(),
   }));
   setHandler(projectChangedSignal, (event) => {
     const parsed = projectChangeEventSchema.parse(event);
+    if (queryState.run !== undefined && runIsTerminal(queryState.run)) return;
+    if (parsed.kind !== "present") {
+      queuedProjectChanges.push(parsed);
+      projectItemAvailability = parsed.kind;
+      if (queryState.run !== undefined) {
+        applyUnavailableObservation(queryState.run, parsed, delivery.workflow.interventions);
+      }
+      cancelActiveExecutions();
+      return;
+    }
+    if (
+      projectItemAvailability === "present" &&
+      latestProjectSnapshot !== undefined &&
+      snapshotIsStale(
+        parsed.snapshot,
+        latestProjectSnapshot,
+        queryState.run?.status,
+        delivery.workflow.board,
+      )
+    ) {
+      return;
+    }
     queuedProjectChanges.push(parsed);
+    projectItemAvailability = "present";
     latestProjectSnapshot = parsed.snapshot;
     const statusBefore = queryState.run?.status;
-    if (parsed.snapshot.status === "blocked" || parsed.snapshot.status === "cancelled") {
+    if (
+      parsed.snapshot.status === delivery.workflow.board.controls.blocked ||
+      parsed.snapshot.status === delivery.workflow.board.controls.cancelled
+    ) {
       if (queryState.run !== undefined) {
-        applyHumanStatus(queryState.run, parsed.snapshot.status, parsed.reason);
+        applyBoardControl(
+          queryState.run,
+          parsed.snapshot.status,
+          delivery.workflow.board,
+          parsed.reason,
+        );
       }
-      for (const scope of activeScopes) scope.cancel();
+      cancelActiveExecutions();
     } else if (
       statusBefore !== undefined &&
-      (projectStatusConflicts(statusBefore, parsed.snapshot.status) ||
+      (projectStatusConflicts(statusBefore, parsed.snapshot.status, delivery.workflow.board) ||
         (queryState.run !== undefined && ticketContextChanged(queryState.run, parsed.snapshot)))
     ) {
-      for (const scope of activeScopes) scope.cancel();
+      cancelActiveExecutions();
     }
   });
   setHandler(blueprintDecisionSignal, (event) => {
@@ -158,6 +203,7 @@ export async function ticketWorkflow(rawInput: TicketWorkflowInput): Promise<Tic
   });
   setHandler(cancelTicketSignal, (event) => {
     const parsed = operatorEventSchema.parse(event);
+    if (queryState.run !== undefined && runIsTerminal(queryState.run)) return;
     queuedCancellations.push(parsed);
     if (queryState.run !== undefined) {
       applyHumanStatus(
@@ -166,27 +212,36 @@ export async function ticketWorkflow(rawInput: TicketWorkflowInput): Promise<Tic
         parsed.reason ?? `cancelled by ${parsed.actor}`,
       );
     }
-    for (const scope of activeScopes) scope.cancel();
+    cancelActiveExecutions();
   });
 
   latestProjectSnapshot = await githubActivities.loadProjectItem(input.projectItemId);
+  projectItemAvailability = "present";
   const run = createTicketRun(latestProjectSnapshot.ticket);
   queryState.run = run;
-  reconcileProjectChange(run, {
-    snapshot: latestProjectSnapshot,
-    reason: "initial GitHub Project state",
-  });
+  reconcileProjectChange(
+    run,
+    {
+      kind: "present",
+      snapshot: latestProjectSnapshot,
+      reason: "initial GitHub Project state",
+    },
+    delivery.workflow.board,
+    delivery.workflow.interventions,
+  );
   applyQueuedEvents();
-  if (run.status !== "blocked" && run.status !== "cancelled") {
-    if (latestProjectSnapshot.status !== "ready") {
+  if (!executionShouldStop(run)) {
+    if (
+      !delivery.workflow.board.entrypoints.implementation.includes(latestProjectSnapshot.status)
+    ) {
       await synchronizeStatus("design_blueprint");
     }
   }
 
   let mergeCommitSha: string | undefined;
-  while (nextAction(run).kind !== "complete") {
+  while (nextAction(run, delivery.workflow.reviewers).kind !== "complete") {
     applyQueuedEvents();
-    const action = nextAction(run);
+    const action = nextAction(run, delivery.workflow.reviewers);
     switch (action.kind) {
       case "blueprint": {
         if (run.ticket.policy.planningDepth === "none") {
@@ -203,7 +258,7 @@ export async function ticketWorkflow(rawInput: TicketWorkflowInput): Promise<Tic
         const result = await runAgentActivity("blueprint", (executionId) =>
           agentActivities.createBlueprint({
             executionId,
-            harness: harnesses.blueprint,
+            ...agentActivityContext("blueprint"),
             ticket: run.ticket,
             baseBranch: input.baseBranch,
             ...(run.blueprint === undefined ? {} : { priorBlueprint: run.blueprint }),
@@ -214,7 +269,7 @@ export async function ticketWorkflow(rawInput: TicketWorkflowInput): Promise<Tic
             ...(run.lastSynthesis === undefined ? {} : { reviewSynthesis: run.lastSynthesis }),
           }),
         );
-        if (result === undefined) break;
+        if (result === undefined || executionShouldStop(run)) break;
         recordBlueprint(run, result.value);
         auditTrail.push(result.audit);
         await githubActivities.publishBlueprint({
@@ -239,12 +294,12 @@ export async function ticketWorkflow(rawInput: TicketWorkflowInput): Promise<Tic
         const blueprint = run.blueprint;
         if (blueprint === undefined) throw new Error("implementation requires a blueprint");
         await synchronizeStatus("in_progress");
-        if (run.status === "blocked" || run.status === "cancelled") break;
+        if (executionShouldStop(run)) break;
         startImplementation(run);
         const result = await runAgentActivity("implementation", (executionId) =>
           agentActivities.implement({
             executionId,
-            harness: harnesses.implementation,
+            ...agentActivityContext("implementation"),
             ticket: run.ticket,
             blueprint,
             baseBranch: input.baseBranch,
@@ -254,7 +309,7 @@ export async function ticketWorkflow(rawInput: TicketWorkflowInput): Promise<Tic
             ...(run.lastSynthesis === undefined ? {} : { reviewSynthesis: run.lastSynthesis }),
           }),
         );
-        if (result === undefined) break;
+        if (result === undefined || executionShouldStop(run)) break;
         recordImplementation(run, result.value);
         auditTrail.push(result.audit);
         await synchronizeStatus(run.status);
@@ -267,14 +322,14 @@ export async function ticketWorkflow(rawInput: TicketWorkflowInput): Promise<Tic
           throw new Error("review requires blueprint and implementation results");
         }
         await synchronizeStatus("in_review");
-        if (run.status === "blocked" || run.status === "cancelled") break;
+        if (executionShouldStop(run)) break;
         const reviewRunId = startReview(run);
         const results = await Promise.all(
           action.reviewers.map(async (reviewer) => {
             const result = await runAgentActivity(`review-${reviewer}`, (executionId) =>
               agentActivities.review({
                 executionId,
-                harness: harnesses.review,
+                ...agentActivityContext("review"),
                 ticket: run.ticket,
                 blueprint,
                 implementation,
@@ -285,7 +340,7 @@ export async function ticketWorkflow(rawInput: TicketWorkflowInput): Promise<Tic
             return result;
           }),
         );
-        if (results.some((result) => result === undefined)) break;
+        if (results.some((result) => result === undefined) || executionShouldStop(run)) break;
         const completedReviews = results.filter(
           (result): result is NonNullable<typeof result> => result !== undefined,
         );
@@ -293,7 +348,7 @@ export async function ticketWorkflow(rawInput: TicketWorkflowInput): Promise<Tic
         const synthesis = await runAgentActivity("synthesis", (executionId) =>
           agentActivities.synthesize({
             executionId,
-            harness: harnesses.synthesis,
+            ...agentActivityContext("synthesis"),
             ticket: run.ticket,
             blueprint,
             implementation,
@@ -301,7 +356,7 @@ export async function ticketWorkflow(rawInput: TicketWorkflowInput): Promise<Tic
             reviewerResults: completedReviews.map((result) => result.value),
           }),
         );
-        if (synthesis === undefined) break;
+        if (synthesis === undefined || executionShouldStop(run)) break;
         auditTrail.push(synthesis.audit);
         recordSynthesis(run, synthesis.value);
         await synchronizeStatus(run.status);
@@ -319,11 +374,11 @@ export async function ticketWorkflow(rawInput: TicketWorkflowInput): Promise<Tic
           throw new Error("repair requires blueprint, implementation, and synthesis results");
         }
         await synchronizeStatus("repairing");
-        if (run.status === "blocked" || run.status === "cancelled") break;
+        if (executionShouldStop(run)) break;
         const result = await runAgentActivity(`repair-${run.repairPass + 1}`, (executionId) =>
           agentActivities.repair({
             executionId,
-            harness: harnesses.repair,
+            ...agentActivityContext("repair"),
             ticket: run.ticket,
             blueprint,
             implementation,
@@ -333,7 +388,7 @@ export async function ticketWorkflow(rawInput: TicketWorkflowInput): Promise<Tic
             ...(run.externalReason === undefined ? {} : { humanFeedback: run.externalReason }),
           }),
         );
-        if (result === undefined) break;
+        if (result === undefined || executionShouldStop(run)) break;
         auditTrail.push(result.audit);
         recordRepair(run, result.value);
         await synchronizeStatus(run.status);
@@ -368,16 +423,21 @@ export async function ticketWorkflow(rawInput: TicketWorkflowInput): Promise<Tic
             reviewRunId: run.lastSynthesis.reviewRunId,
             finding,
           });
+          if (executionShouldStop(run)) break;
           recordMaterializedDeferral(run, findingId, issue.issueId);
         }
-        finishDeferralMaterialization(run);
+        if (run.status === "materializing_deferrals") finishDeferralMaterialization(run);
         await synchronizeStatus(run.status);
         break;
       }
       case "merge": {
         if (run.implementation === undefined) throw new Error("merge requires implementation");
-        const mergeInput = { ticket: run.ticket, implementation: run.implementation };
+        const mergeInput = {
+          ticket: run.ticket,
+          implementation: run.implementation,
+        };
         const readiness = await githubActivities.getMergeReadiness(mergeInput);
+        if (executionShouldStop(run)) break;
         const gate = mergeGateInput(run, readiness.mergeable || readiness.merged);
         if (!readiness.mergeable && !readiness.merged) {
           await sleep("1 minute");
@@ -385,9 +445,14 @@ export async function ticketWorkflow(rawInput: TicketWorkflowInput): Promise<Tic
         }
         startMerge(run, gate);
         await synchronizeStatus("merging");
+        if (executionShouldStop(run)) break;
         mergeCommitSha = await githubActivities.merge(mergeInput);
+        if (executionShouldStop(run)) break;
         completeMerge(run);
         await synchronizeStatus("done");
+        if (delivery.workflow.dependencies.closeIssueAfterMerge) {
+          await githubActivities.closeSourceIssue({ ticket: run.ticket });
+        }
         break;
       }
       case "wait":
@@ -397,7 +462,7 @@ export async function ticketWorkflow(rawInput: TicketWorkflowInput): Promise<Tic
             queuedProjectChanges.length > 0 ||
             queuedBlueprintDecisions.length > 0 ||
             queuedMergeDecisions.length > 0 ||
-            run.status === "cancelled",
+            runIsTerminal(run),
         );
         break;
       case "complete":
@@ -427,8 +492,13 @@ export async function ticketWorkflow(rawInput: TicketWorkflowInput): Promise<Tic
     while (queuedProjectChanges.length > 0) {
       const change = queuedProjectChanges.shift();
       if (change === undefined) break;
-      latestProjectSnapshot = change.snapshot;
-      reconcileProjectChange(run, change);
+      if (change.kind === "present") {
+        latestProjectSnapshot = change.snapshot;
+        projectItemAvailability = "present";
+      } else {
+        projectItemAvailability = change.kind;
+      }
+      reconcileProjectChange(run, change, delivery.workflow.board, delivery.workflow.interventions);
     }
     if (run.status !== "awaiting_blueprint_approval") queuedBlueprintDecisions.length = 0;
     if (queuedBlueprintDecisions.length > 0 && run.status === "awaiting_blueprint_approval") {
@@ -450,28 +520,82 @@ export async function ticketWorkflow(rawInput: TicketWorkflowInput): Promise<Tic
   }
 
   async function synchronizeStatus(targetStatus: TicketStatus): Promise<void> {
-    if (latestProjectSnapshot === undefined) return;
-    if (latestProjectSnapshot.status === targetStatus) return;
     if (
-      latestProjectSnapshot.status === "blocked" ||
-      latestProjectSnapshot.status === "cancelled"
+      latestProjectSnapshot === undefined ||
+      projectItemAvailability !== "present" ||
+      targetStatus === "orphaned"
     ) {
-      applyHumanStatus(run, latestProjectSnapshot.status, "authoritative GitHub status");
+      return;
+    }
+    const targetBoardState = delivery.workflow.board.states[targetStatus];
+    if (latestProjectSnapshot.status === targetBoardState) return;
+    if (
+      latestProjectSnapshot.status === delivery.workflow.board.controls.blocked ||
+      latestProjectSnapshot.status === delivery.workflow.board.controls.cancelled
+    ) {
+      applyBoardControl(
+        run,
+        latestProjectSnapshot.status,
+        delivery.workflow.board,
+        "authoritative GitHub status",
+      );
       return;
     }
     const result = await githubActivities.transitionProjectStatus({
       projectItemId: input.projectItemId,
       expectedStatus: latestProjectSnapshot.status,
       expectedUpdatedAt: latestProjectSnapshot.updatedAt,
-      targetStatus,
+      expectedTicket: latestProjectSnapshot.ticket,
+      targetStatus: targetBoardState,
     });
     latestProjectSnapshot = result.snapshot;
     if (result.kind === "conflict") {
-      reconcileProjectChange(run, { snapshot: result.snapshot, reason: result.reason });
-      if (run.status !== "blocked" && run.status !== "cancelled") {
+      if (
+        result.snapshot.status === targetBoardState &&
+        !ticketContextChanged(run, result.snapshot)
+      ) {
+        return;
+      }
+      reconcileProjectChange(
+        run,
+        { kind: "present", snapshot: result.snapshot, reason: result.reason },
+        delivery.workflow.board,
+        delivery.workflow.interventions,
+      );
+      if (!executionShouldStop(run)) {
         applyHumanStatus(run, "blocked", result.reason);
       }
+    } else if (result.snapshot.status !== targetBoardState) {
+      reconcileProjectChange(
+        run,
+        {
+          kind: "present",
+          snapshot: result.snapshot,
+          reason: `GitHub changed while Thor was transitioning to ${targetBoardState}`,
+        },
+        delivery.workflow.board,
+        delivery.workflow.interventions,
+      );
     }
+  }
+
+  function agentActivityContext(phase: keyof WorkflowAgentRoles): {
+    agent: AgentProfileSnapshot;
+    skillSelectors: RuntimeDeliveryProfile["skillSelectors"];
+    declarationDigest: string;
+    workflowProfile: string;
+  } {
+    const agentId = delivery.workflow.agents[phase];
+    const agent = delivery.agents[agentId];
+    if (agent === undefined) {
+      throw new Error(`Workflow phase ${phase} references missing agent profile ${agentId}`);
+    }
+    return {
+      agent,
+      skillSelectors: delivery.skillSelectors,
+      declarationDigest: delivery.declarationDigest,
+      workflowProfile: `${delivery.workflow.id}@${delivery.workflow.version}`,
+    };
   }
 
   async function runAgentActivity<Value>(
@@ -489,61 +613,252 @@ export async function ticketWorkflow(rawInput: TicketWorkflowInput): Promise<Tic
       return await scope.run(() => execute(executionId));
     } catch (error) {
       applyQueuedEvents();
-      if (isCancellation(error) && (run.status === "blocked" || run.status === "cancelled")) {
+      if (isCancellation(error) && interventionCancelledScopes.has(scope)) {
         return undefined;
       }
       throw error;
     } finally {
+      interventionCancelledScopes.delete(scope);
       activeScopes.delete(scope);
       activeExecutionIds.delete(executionId);
     }
   }
+
+  function cancelActiveExecutions(): void {
+    for (const scope of activeScopes) {
+      interventionCancelledScopes.add(scope);
+      scope.cancel();
+    }
+  }
 }
 
-function reconcileProjectChange(run: TicketRun, change: ProjectChangeEvent): void {
-  if (run.status === "cancelled") return;
-  if (ticketContextChanged(run, change.snapshot)) {
-    run.ticket = change.snapshot.ticket;
-    run.suspendedStatus = "design_blueprint";
-    run.status = "blocked";
-    run.externalReason =
-      change.reason ?? "GitHub ticket or execution policy changed during automated work";
+function reconcileProjectChange(
+  run: TicketRun,
+  change: ProjectChangeEvent,
+  board: BoardProjection,
+  interventions: InterventionPolicy,
+): void {
+  if (runIsTerminal(run)) return;
+  if (change.kind !== "present") {
+    applyUnavailableObservation(run, change, interventions);
     return;
   }
-  const status = change.snapshot.status;
-  if (status === "blocked" || status === "cancelled" || run.status === "blocked") {
-    applyHumanStatus(run, status, change.reason);
+  const contextChange = classifyTicketContextChange(run.ticket, change.snapshot.ticket);
+  if (contextChange !== "none") {
+    applyTicketContextChange(run, change, contextChange, interventions);
     return;
   }
-  if (projectStatusConflicts(run.status, status)) {
+  if (!run.ticket.dependencies.every((dependency) => dependency.complete)) {
     applyHumanStatus(
       run,
       "blocked",
-      change.reason ?? `GitHub moved unexpectedly from ${run.status} to ${status}`,
+      change.reason ?? "one or more blocking GitHub issue dependencies are incomplete",
     );
+    return;
+  }
+  if (!policyAllowsAgent(run.ticket.policy)) {
+    applyHumanStatus(
+      run,
+      "blocked",
+      change.reason ?? "GitHub ticket policy no longer permits agent execution",
+    );
+    return;
+  }
+  const status = change.snapshot.status;
+  if (run.status === "awaiting_blueprint_approval") {
+    if (status === board.approvals.blueprint.approved) {
+      decideBlueprint(run, "approved", change.reason);
+      return;
+    }
+    if (status === board.approvals.blueprint.changesRequested) {
+      decideBlueprint(run, "changes_requested", change.reason);
+      return;
+    }
+  }
+  if (run.status === "automated_review_passed" || run.status === "awaiting_human_merge_review") {
+    if (status === board.approvals.merge.approved) {
+      decideMerge(run, "approved", change.reason);
+      return;
+    }
+    if (status === board.approvals.merge.changesRequested) {
+      decideMerge(run, "changes_requested", change.reason);
+      return;
+    }
+  }
+  if (status === board.controls.blocked || status === board.controls.cancelled) {
+    applyBoardControl(run, status, board, change.reason);
+    return;
+  }
+  if (run.status === "blocked") {
+    const suspended = run.suspendedStatus ?? "design_blueprint";
+    if (suspended !== "orphaned" && status === board.states[suspended]) {
+      applyHumanStatus(run, suspended, change.reason);
+    }
+    return;
+  }
+  if (projectStatusConflicts(run.status, status, board)) {
+    const projectedRunStatus =
+      run.status === "orphaned" ? "internal Orphaned" : board.states[run.status];
+    const reason =
+      change.reason ??
+      `GitHub moved unexpectedly from ${projectedRunStatus} to ${status} while Thor was ${run.status}`;
+    if (interventions.unexpectedStatuses === "cancel") {
+      applyHumanStatus(run, "cancelled", reason);
+    } else {
+      applyHumanStatus(run, "blocked", reason);
+    }
   }
 }
 
 function ticketContextChanged(run: TicketRun, snapshot: ProjectItemSnapshot): boolean {
-  return JSON.stringify(run.ticket) !== JSON.stringify(snapshot.ticket);
+  return !ticketContextsEqual(run.ticket, snapshot.ticket);
 }
 
-function projectStatusConflicts(runStatus: TicketStatus, projectStatus: TicketStatus): boolean {
-  if (runStatus === projectStatus) return false;
-  if (runStatus === "design_blueprint" && projectStatus === "ready") return false;
+function applyTicketContextChange(
+  run: TicketRun,
+  change: Extract<ProjectChangeEvent, { kind: "present" }>,
+  changeKind: Exclude<TicketContextChangeKind, "none">,
+  interventions: InterventionPolicy,
+): void {
+  const reason =
+    change.reason ??
+    (changeKind === "dependencies"
+      ? "GitHub blocking dependencies changed during automated work"
+      : "GitHub ticket intent or execution policy changed during automated work");
+  if (changeKind === "identity") {
+    applyHumanStatus(run, "cancelled", `GitHub ticket identity changed: ${reason}`);
+    return;
+  }
+  const action =
+    changeKind === "dependencies" ? interventions.dependencyChanges : interventions.ticketChanges;
+  run.ticket = change.snapshot.ticket;
+  if (action === "cancel") {
+    applyHumanStatus(run, "cancelled", reason);
+    return;
+  }
+  if (action === "replan") {
+    run.suspendedStatus = "design_blueprint";
+  } else if (run.status !== "blocked") {
+    run.suspendedStatus = run.status;
+  }
+  run.status = "blocked";
+  run.externalReason = reason;
+}
+
+function applyUnavailableObservation(
+  run: TicketRun,
+  change: Extract<ProjectChangeEvent, { kind: "removed" | "unreadable" }>,
+  interventions: InterventionPolicy,
+): void {
+  if (runIsTerminal(run)) return;
+  const reason =
+    change.reason ??
+    (change.kind === "removed"
+      ? "GitHub Project item was removed"
+      : "GitHub Project item could not be read reliably");
+  if (change.kind === "removed") {
+    if (interventions.removedItems === "orphan") orphanTicket(run, reason);
+    else applyHumanStatus(run, "cancelled", reason);
+    return;
+  }
+  if (interventions.unreadableItems.action === "cancel") {
+    applyHumanStatus(run, "cancelled", reason);
+  } else {
+    applyHumanStatus(run, "blocked", reason);
+  }
+}
+
+function snapshotIsStale(
+  incoming: ProjectItemSnapshot,
+  current: ProjectItemSnapshot,
+  runStatus: TicketStatus | undefined,
+  board: BoardProjection,
+): boolean {
+  if (incoming.updatedAt === current.updatedAt) {
+    if (!ticketContextsEqual(incoming.ticket, current.ticket)) return false;
+    if (incoming.status === current.status) return true;
+    if (
+      incoming.status === board.controls.blocked ||
+      incoming.status === board.controls.cancelled
+    ) {
+      return false;
+    }
+    if (
+      runStatus === "awaiting_blueprint_approval" &&
+      (incoming.status === board.approvals.blueprint.approved ||
+        incoming.status === board.approvals.blueprint.changesRequested)
+    ) {
+      return false;
+    }
+    if (
+      (runStatus === "automated_review_passed" || runStatus === "awaiting_human_merge_review") &&
+      (incoming.status === board.approvals.merge.approved ||
+        incoming.status === board.approvals.merge.changesRequested)
+    ) {
+      return false;
+    }
+    return true;
+  }
+  const incomingTime = Date.parse(incoming.updatedAt);
+  const currentTime = Date.parse(current.updatedAt);
+  return (
+    Number.isFinite(incomingTime) && Number.isFinite(currentTime) && incomingTime < currentTime
+  );
+}
+
+function projectStatusConflicts(
+  runStatus: TicketStatus,
+  projectStatus: string,
+  board: BoardProjection,
+): boolean {
+  if (runStatus === "orphaned") return false;
+  if (board.states[runStatus] === projectStatus) return false;
+  if (
+    runStatus === "design_blueprint" &&
+    board.entrypoints.implementation.includes(projectStatus)
+  ) {
+    return false;
+  }
   if (
     runStatus === "awaiting_blueprint_approval" &&
-    (projectStatus === "ready" || projectStatus === "design_blueprint")
+    (projectStatus === board.approvals.blueprint.approved ||
+      projectStatus === board.approvals.blueprint.changesRequested)
   ) {
     return false;
   }
   if (
     (runStatus === "automated_review_passed" || runStatus === "awaiting_human_merge_review") &&
-    (projectStatus === "ready_to_merge" || projectStatus === "repairing")
+    (projectStatus === board.states.awaiting_human_merge_review ||
+      projectStatus === board.approvals.merge.approved ||
+      projectStatus === board.approvals.merge.changesRequested)
   ) {
     return false;
   }
+  if (runStatus === "blocked" && projectStatus !== board.controls.cancelled) return false;
   return true;
+}
+
+function runIsTerminal(run: TicketRun): boolean {
+  return run.status === "done" || run.status === "cancelled" || run.status === "orphaned";
+}
+
+function executionShouldStop(run: TicketRun): boolean {
+  return run.status === "blocked" || runIsTerminal(run);
+}
+
+function applyBoardControl(
+  run: TicketRun,
+  boardState: string,
+  board: BoardProjection,
+  reason?: string,
+): void {
+  if (boardState === board.controls.cancelled) {
+    applyHumanStatus(run, "cancelled", reason);
+  } else if (boardState === board.controls.blocked) {
+    applyHumanStatus(run, "blocked", reason);
+  } else {
+    applyHumanStatus(run, "design_blueprint", reason);
+  }
 }
 
 function ticketPlan(run: TicketRun): Blueprint {

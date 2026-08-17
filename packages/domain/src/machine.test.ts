@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { deferredIssueIdSchema, findingIdSchema, projectItemIdSchema } from "./ids.js";
+import {
+  deferredIssueIdSchema,
+  findingIdSchema,
+  issueIdSchema,
+  projectItemIdSchema,
+} from "./ids.js";
 import {
   applyHumanStatus,
   approveDeferrals,
@@ -32,6 +37,7 @@ import type {
 function ticket(approvalPolicy: ApprovalPolicy = "autonomous"): TicketContext {
   return {
     projectItemId: projectItemIdSchema.parse("PVTI_test"),
+    issueId: issueIdSchema.parse("I_test"),
     repository: { owner: "example", name: "repo" },
     issueNumber: 42,
     title: "Build feature",
@@ -181,6 +187,7 @@ describe("TicketRun", () => {
       findingIdSchema.parse("F1"),
       deferredIssueIdSchema.parse("I_99"),
     );
+    finishDeferralMaterialization(run);
     expect(run.status).toBe("ready_to_merge");
   });
 

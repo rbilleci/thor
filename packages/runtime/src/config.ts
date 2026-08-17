@@ -3,19 +3,13 @@ import path from "node:path";
 
 import { Connection } from "@temporalio/client";
 import { NativeConnection } from "@temporalio/worker";
-import {
-  agentPolicySchema,
-  planningDepthSchema,
-  prioritySchema,
-  severitySchema,
-  ticketStatusSchema,
-  workTypeSchema,
-  type NormalizedFinding,
-  type TicketContext,
-  type TicketStatus,
-} from "@thor/domain";
+import type { CompiledProjectBinding, DeliveryProjectDeclaration } from "@thor/config";
+import { loadDeliveryProjectDeclaration } from "@thor/config/node";
+import { type NormalizedFinding, type RepositoryRef, type TicketContext } from "@thor/domain";
 import {
   OctokitGitHubGateway,
+  OctokitProjectAdministrationGateway,
+  ProjectConfigurationManager,
   type DeferredProjectField,
   type GitHubAuth,
   type GitHubProjectConfiguration,
@@ -45,14 +39,10 @@ const environmentSchema = z.object({
     .string()
     .regex(/^\d{4}-\d{2}-\d{2}$/)
     .default("2026-03-10"),
-  GITHUB_PROJECT_ID: z.string().min(1),
-  GITHUB_STATUS_FIELD_ID: z.string().min(1),
-  GITHUB_STATUS_OPTIONS_JSON: z.string().min(2),
-  GITHUB_DEFERRED_FIELDS_JSON: z.string().min(2).default("{}"),
+  THOR_PROJECT_DECLARATION: z.string().min(1).default("./config/delivery-project.json"),
   THOR_SOURCE_ROOT: z.string().min(1).default("./repositories"),
   THOR_WORKTREE_ROOT: z.string().min(1).default("./.thor-worktrees"),
   THOR_RESOURCE_ROOT: z.string().min(1).default("./resources"),
-  THOR_BASE_BRANCH: z.string().min(1).default("main"),
 });
 
 const temporalEnvironmentSchema = environmentSchema.pick({
@@ -63,21 +53,13 @@ const temporalEnvironmentSchema = environmentSchema.pick({
   TEMPORAL_TLS: true,
 });
 
-const fieldIdSchema = z.string().trim().min(1);
-const selectFieldSchema = <Key extends z.ZodEnum>(keySchema: Key) =>
-  z.object({
-    fieldId: fieldIdSchema,
-    options: z.partialRecord(keySchema, fieldIdSchema),
-  });
-const deferredFieldRoutingSchema = z.object({
-  type: selectFieldSchema(workTypeSchema).optional(),
-  priority: selectFieldSchema(prioritySchema).optional(),
-  component: z.object({ fieldId: fieldIdSchema }).optional(),
-  agentPolicy: selectFieldSchema(agentPolicySchema).optional(),
-  planningDepth: selectFieldSchema(planningDepthSchema).optional(),
-  severity: selectFieldSchema(severitySchema).optional(),
-});
-export type DeferredFieldRouting = z.infer<typeof deferredFieldRoutingSchema>;
+export type ProjectControlConfiguration = {
+  auth: GitHubAuth;
+  apiUrl?: string;
+  apiVersion: string;
+  declarationPath: string;
+  declaration: DeliveryProjectDeclaration;
+};
 
 export type RuntimeConfiguration = {
   temporal: {
@@ -90,16 +72,15 @@ export type RuntimeConfiguration = {
   github: {
     auth: GitHubAuth;
     project: GitHubProjectConfiguration;
-    deferredFields: DeferredFieldRouting;
     apiUrl?: string;
     apiVersion: string;
   };
+  binding: CompiledProjectBinding;
   paths: {
     sourceRoot: string;
     worktreeRoot: string;
     resourceRoot: string;
   };
-  baseBranch: string;
 };
 
 export async function loadRuntimeConfiguration(
@@ -107,9 +88,9 @@ export async function loadRuntimeConfiguration(
   cwd: string = process.cwd(),
 ): Promise<RuntimeConfiguration> {
   const parsed = environmentSchema.parse(environment);
-  const auth = await githubAuth(parsed, cwd);
-  const statusOptions = parseStatusOptions(parsed.GITHUB_STATUS_OPTIONS_JSON);
-  const deferredFields = parseDeferredFields(parsed.GITHUB_DEFERRED_FIELDS_JSON);
+  const control = await loadProjectControlConfiguration(environment, cwd);
+  const manager = createProjectConfigurationManager(control);
+  const binding = await manager.validate(control.declaration);
   return {
     temporal: {
       address: parsed.TEMPORAL_ADDRESS,
@@ -119,23 +100,52 @@ export async function loadRuntimeConfiguration(
       ...(parsed.TEMPORAL_API_KEY === undefined ? {} : { apiKey: parsed.TEMPORAL_API_KEY }),
     },
     github: {
-      auth,
+      auth: control.auth,
       project: {
-        projectId: parsed.GITHUB_PROJECT_ID,
-        statusFieldId: parsed.GITHUB_STATUS_FIELD_ID,
-        statusOptions,
+        projectId: binding.project.id,
+        fields: binding.fields,
+        ticketDefaults: binding.ticketDefaults,
+        dependencyCompletion: binding.delivery.workflow.dependencies.completion,
+        doneOptionId:
+          binding.fields.lifecycle.options[binding.delivery.workflow.board.states.done] ?? "",
       },
-      deferredFields,
-      apiVersion: parsed.GITHUB_API_VERSION,
-      ...(parsed.GITHUB_API_URL === undefined ? {} : { apiUrl: parsed.GITHUB_API_URL }),
+      apiVersion: control.apiVersion,
+      ...(control.apiUrl === undefined ? {} : { apiUrl: control.apiUrl }),
     },
+    binding,
     paths: {
       sourceRoot: path.resolve(cwd, parsed.THOR_SOURCE_ROOT),
       worktreeRoot: path.resolve(cwd, parsed.THOR_WORKTREE_ROOT),
       resourceRoot: path.resolve(cwd, parsed.THOR_RESOURCE_ROOT),
     },
-    baseBranch: parsed.THOR_BASE_BRANCH,
   };
+}
+
+export async function loadProjectControlConfiguration(
+  environment: NodeJS.ProcessEnv = process.env,
+  cwd: string = process.cwd(),
+): Promise<ProjectControlConfiguration> {
+  const parsed = environmentSchema.parse(environment);
+  const declarationPath = path.resolve(cwd, parsed.THOR_PROJECT_DECLARATION);
+  return {
+    auth: await githubAuth(parsed, cwd),
+    apiVersion: parsed.GITHUB_API_VERSION,
+    ...(parsed.GITHUB_API_URL === undefined ? {} : { apiUrl: parsed.GITHUB_API_URL }),
+    declarationPath,
+    declaration: await loadDeliveryProjectDeclaration(declarationPath),
+  };
+}
+
+export function createProjectConfigurationManager(
+  configuration: ProjectControlConfiguration,
+): ProjectConfigurationManager {
+  return new ProjectConfigurationManager(
+    new OctokitProjectAdministrationGateway({
+      auth: configuration.auth,
+      apiVersion: configuration.apiVersion,
+      ...(configuration.apiUrl === undefined ? {} : { apiUrl: configuration.apiUrl }),
+    }),
+  );
 }
 
 export function loadTemporalConfiguration(
@@ -207,30 +217,24 @@ async function githubAuth(
   };
 }
 
-function parseStatusOptions(value: string): Record<TicketStatus, string> {
-  const raw: unknown = JSON.parse(value);
-  return z.record(ticketStatusSchema, z.string().min(1)).parse(raw);
-}
-
-function parseDeferredFields(value: string): DeferredFieldRouting {
-  const raw: unknown = JSON.parse(value);
-  return deferredFieldRoutingSchema.parse(raw);
-}
-
 export function mapDeferredProjectFields(
-  routing: DeferredFieldRouting,
+  binding: Pick<CompiledProjectBinding, "fields">,
   finding: NormalizedFinding,
   ticket: TicketContext,
 ): DeferredProjectField[] {
   const fields: DeferredProjectField[] = [];
-  addSelect(fields, routing.type, ticket.workType);
-  addSelect(fields, routing.priority, ticket.priority);
-  if (routing.component !== undefined && ticket.component !== undefined) {
-    fields.push({ fieldId: routing.component.fieldId, kind: "text", text: ticket.component });
+  addSelect(fields, binding.fields.workType, ticket.workType);
+  addSelect(fields, binding.fields.priority, ticket.priority);
+  if (binding.fields.component !== undefined && ticket.component !== undefined) {
+    fields.push({
+      fieldId: binding.fields.component.fieldId,
+      kind: "text",
+      text: ticket.component,
+    });
   }
-  addSelect(fields, routing.agentPolicy, ticket.policy.agentPolicy);
-  addSelect(fields, routing.planningDepth, ticket.policy.planningDepth);
-  addSelect(fields, routing.severity, finding.severity);
+  addSelect(fields, binding.fields.agentPolicy, ticket.policy.agentPolicy);
+  addSelect(fields, binding.fields.planningDepth, ticket.policy.planningDepth);
+  addSelect(fields, binding.fields.severity, finding.severity);
   return fields;
 }
 
@@ -243,4 +247,18 @@ function addSelect(
   if (route !== undefined && optionId !== undefined) {
     fields.push({ fieldId: route.fieldId, kind: "single_select", optionId });
   }
+}
+
+export function baseBranchFor(binding: CompiledProjectBinding, repository: RepositoryRef): string {
+  const configured = binding.repositories.find(
+    (candidate) =>
+      candidate.owner.toLowerCase() === repository.owner.toLowerCase() &&
+      candidate.name.toLowerCase() === repository.name.toLowerCase(),
+  );
+  if (configured === undefined) {
+    throw new Error(
+      `repository ${repository.owner}/${repository.name} is not declared by ${binding.delivery.declarationName}`,
+    );
+  }
+  return configured.baseBranch;
 }

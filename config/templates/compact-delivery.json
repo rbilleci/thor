@@ -1,0 +1,200 @@
+{
+  "apiVersion": "thor.dev/v1alpha1",
+  "kind": "DeliveryProject",
+  "metadata": {
+    "name": "compact-delivery",
+    "version": "1.0.0"
+  },
+  "github": {
+    "owner": "example",
+    "ownerType": "organization",
+    "projectNumber": 2,
+    "title": "Compact Delivery",
+    "visibility": "private",
+    "repositories": [{ "owner": "example", "name": "service", "baseBranch": "trunk" }],
+    "fields": {
+      "lifecycle": {
+        "type": "single_select",
+        "name": "Delivery Stage",
+        "requiredOnItems": true,
+        "options": {
+          "backlog": { "name": "Inbox", "color": "GRAY" },
+          "discovery": { "name": "Explore", "color": "PURPLE" },
+          "design": { "name": "Design", "color": "BLUE" },
+          "blueprint_gate": { "name": "Design Approval", "color": "YELLOW" },
+          "ready": { "name": "Ready", "color": "GREEN" },
+          "active": { "name": "Doing", "color": "BLUE" },
+          "review": { "name": "Verification", "color": "PURPLE" },
+          "repair": { "name": "Fixing", "color": "ORANGE" },
+          "merge_gate": { "name": "Merge Approval", "color": "YELLOW" },
+          "ready_to_merge": { "name": "Landing", "color": "GREEN" },
+          "done": { "name": "Shipped", "color": "GREEN" },
+          "blocked": { "name": "Waiting", "color": "RED" },
+          "cancelled": { "name": "Dropped", "color": "GRAY" }
+        }
+      },
+      "workType": {
+        "type": "single_select",
+        "name": "Kind",
+        "requiredOnItems": true,
+        "options": {
+          "feature": { "name": "Capability", "color": "BLUE" },
+          "bug": { "name": "Defect", "color": "RED" },
+          "task": { "name": "Work", "color": "GRAY" }
+        }
+      },
+      "priority": {
+        "type": "single_select",
+        "name": "Urgency",
+        "requiredOnItems": true,
+        "options": {
+          "P0": { "name": "Immediate", "color": "RED" },
+          "P1": { "name": "High", "color": "ORANGE" },
+          "P2": { "name": "Normal", "color": "YELLOW" },
+          "P3": { "name": "Low", "color": "GRAY" }
+        }
+      },
+      "executionMode": {
+        "type": "single_select",
+        "name": "Automation",
+        "requiredOnItems": true,
+        "options": {
+          "human": { "name": "People", "color": "GRAY" },
+          "agent": { "name": "Autonomous", "color": "BLUE" },
+          "human_and_agent": { "name": "Paired", "color": "PURPLE" },
+          "disabled": { "name": "Off", "color": "RED" }
+        }
+      },
+      "approvalPolicy": {
+        "type": "single_select",
+        "name": "Gates",
+        "requiredOnItems": true,
+        "options": {
+          "autonomous": { "name": "None", "color": "GREEN" },
+          "blueprint_review": { "name": "Design", "color": "YELLOW" },
+          "pre_merge_review": { "name": "Merge", "color": "ORANGE" },
+          "blueprint_and_pre_merge_review": {
+            "name": "Design and Merge",
+            "color": "RED"
+          }
+        }
+      },
+      "severity": {
+        "type": "single_select",
+        "name": "Finding Severity",
+        "requiredOnItems": false,
+        "options": {
+          "low": { "name": "Minor", "color": "BLUE" },
+          "medium": { "name": "Moderate", "color": "YELLOW" },
+          "high": { "name": "Major", "color": "ORANGE" },
+          "critical": { "name": "Critical", "color": "RED" }
+        }
+      }
+    },
+    "views": {
+      "compact-board": {
+        "name": "Work board",
+        "layout": "BOARD_LAYOUT",
+        "visibleFields": ["lifecycle", "workType", "priority", "approvalPolicy"]
+      }
+    }
+  },
+  "ticketDefaults": {
+    "workType": "task",
+    "priority": "P2",
+    "executionMode": "agent",
+    "planningDepth": "light",
+    "approvalPolicy": "pre_merge_review",
+    "agentPolicy": "allowed",
+    "autonomousRepairBudget": 2
+  },
+  "workflow": {
+    "id": "compact-software-delivery",
+    "implementation": "ticket-delivery/v1",
+    "version": "1.0.0",
+    "board": {
+      "states": {
+        "backlog": "backlog",
+        "discovery": "discovery",
+        "design_blueprint": "design",
+        "awaiting_blueprint_approval": "blueprint_gate",
+        "ready": "ready",
+        "in_progress": "active",
+        "ready_for_review": "active",
+        "in_review": "review",
+        "repairing": "repair",
+        "re_review": "review",
+        "automated_review_passed": "review",
+        "awaiting_human_merge_review": "merge_gate",
+        "materializing_deferrals": "ready_to_merge",
+        "ready_to_merge": "ready_to_merge",
+        "merging": "ready_to_merge",
+        "done": "done",
+        "blocked": "blocked",
+        "cancelled": "cancelled"
+      },
+      "entrypoints": {
+        "blueprint": ["design"],
+        "implementation": ["ready"]
+      },
+      "controls": { "blocked": "blocked", "cancelled": "cancelled" },
+      "approvals": {
+        "blueprint": { "approved": "ready", "changesRequested": "design" },
+        "merge": { "approved": "ready_to_merge", "changesRequested": "repair" }
+      }
+    },
+    "reviewers": ["correctness", "security", "testing", "product_specification"],
+    "agents": {
+      "blueprint": "compact-planner",
+      "implementation": "compact-builder",
+      "review": "compact-reviewer",
+      "synthesis": "compact-synthesizer",
+      "repair": "compact-builder"
+    },
+    "interventions": {
+      "ticketChanges": "replan",
+      "dependencyChanges": "resume",
+      "unexpectedStatuses": "block",
+      "unreadableItems": { "action": "block", "afterConsecutivePolls": 2 },
+      "removedItems": "orphan"
+    },
+    "dependencies": {
+      "completion": "issue_closed_or_project_done",
+      "closeIssueAfterMerge": true
+    }
+  },
+  "agents": {
+    "compact-planner": {
+      "harness": "codex",
+      "resourceProfile": "default",
+      "configuration": { "approvalPolicy": "never", "sandboxMode": "read-only" }
+    },
+    "compact-builder": {
+      "harness": "claude",
+      "resourceProfile": "default",
+      "configuration": { "maxTurns": "50", "permissionMode": "acceptEdits" }
+    },
+    "compact-reviewer": {
+      "harness": "codex",
+      "resourceProfile": "default",
+      "configuration": { "approvalPolicy": "never", "sandboxMode": "read-only" }
+    },
+    "compact-synthesizer": {
+      "harness": "claude",
+      "resourceProfile": "default",
+      "configuration": { "maxTurns": "30", "permissionMode": "plan" }
+    }
+  },
+  "skillSelectors": [
+    {
+      "skill": "security",
+      "reason": "compact profile security selector",
+      "match": { "riskFlags": ["security_sensitive"], "keywords": ["security", "auth"] }
+    },
+    {
+      "skill": "regression-testing",
+      "reason": "compact profile defect selector",
+      "match": { "workTypes": ["bug"], "keywords": ["regression", "test"] }
+    }
+  ]
+}

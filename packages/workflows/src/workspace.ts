@@ -121,12 +121,7 @@ export class GitWorkspaceManager implements WorkspaceManager {
         ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`],
         signal,
       )) === 0;
-    const remoteBranchExists =
-      (await gitExitCode(
-        repositoryPath,
-        ["show-ref", "--verify", "--quiet", `refs/remotes/origin/${branch}`],
-        signal,
-      )) === 0;
+    const remoteBranchExists = await ensureRemoteBranchRef(repositoryPath, branch, signal);
     if (localBranchExists) {
       await git(repositoryPath, ["worktree", "add", worktreePath, branch], signal);
     } else {
@@ -169,12 +164,7 @@ export class GitWorkspaceManager implements WorkspaceManager {
     if (localBranchExists) {
       await git(repositoryPath, ["worktree", "add", worktreePath, branch], signal);
     } else {
-      const remoteBranchExists =
-        (await gitExitCode(
-          repositoryPath,
-          ["show-ref", "--verify", "--quiet", `refs/remotes/origin/${branch}`],
-          signal,
-        )) === 0;
+      const remoteBranchExists = await ensureRemoteBranchRef(repositoryPath, branch, signal);
       if (!remoteBranchExists) {
         throw new WorkspaceError(`remote branch ${branch} does not exist`, false);
       }
@@ -279,7 +269,7 @@ async function gitExitCode(cwd: string, args: string[], signal: AbortSignal): Pr
   }
 }
 
-function branchFor(projectItemId: ProjectItemId): string {
+export function branchFor(projectItemId: ProjectItemId): string {
   const readable = projectItemId.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 40);
   return `thor/${readable}-${worktreeKey(projectItemId).slice(0, 8)}`;
 }
@@ -315,6 +305,27 @@ async function requireBranch(
       false,
     );
   }
+}
+
+async function ensureRemoteBranchRef(
+  repositoryPath: string,
+  branch: string,
+  signal: AbortSignal,
+): Promise<boolean> {
+  const remoteRef = `refs/remotes/origin/${branch}`;
+  if (
+    (await gitExitCode(repositoryPath, ["show-ref", "--verify", "--quiet", remoteRef], signal)) ===
+    0
+  ) {
+    return true;
+  }
+  const remoteHead = `refs/heads/${branch}`;
+  const fetchResult = await gitExitCode(
+    repositoryPath,
+    ["fetch", "origin", `+${remoteHead}:${remoteRef}`],
+    signal,
+  );
+  return fetchResult === 0;
 }
 
 async function isDirectory(target: string): Promise<boolean> {

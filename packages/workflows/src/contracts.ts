@@ -1,4 +1,11 @@
 import {
+  boardStateKeySchema,
+  runtimeDeliveryProfileSchema,
+  sha256DigestSchema,
+  type AgentProfileSnapshot,
+  type SkillSelector,
+} from "@thor/config/schema";
+import {
   blueprintSchema,
   executionIdSchema,
   harnessKindSchema,
@@ -8,11 +15,9 @@ import {
   reviewerResultSchema,
   reviewSynthesisSchema,
   ticketContextSchema,
-  ticketStatusSchema,
   type Blueprint,
   type ExecutionId,
   type FindingId,
-  type HarnessKind,
   type ImplementationResult,
   type NormalizedFinding,
   type ProjectItemId,
@@ -32,25 +37,10 @@ import type {
 } from "@thor/github";
 import { z } from "zod";
 
-export const harnessRoutingSchema = z.object({
-  blueprint: harnessKindSchema.default("claude"),
-  implementation: harnessKindSchema.default("codex"),
-  review: harnessKindSchema.default("claude"),
-  synthesis: harnessKindSchema.default("claude"),
-  repair: harnessKindSchema.default("codex"),
-});
-export type HarnessRouting = z.infer<typeof harnessRoutingSchema>;
-
-export const ticketWorkflowInputSchema = z.object({
+export const ticketWorkflowInputSchema = z.strictObject({
   projectItemId: projectItemIdSchema,
   baseBranch: z.string().trim().min(1).default("main"),
-  harnesses: harnessRoutingSchema.default({
-    blueprint: "claude",
-    implementation: "codex",
-    review: "claude",
-    synthesis: "claude",
-    repair: "codex",
-  }),
+  delivery: runtimeDeliveryProfileSchema,
 });
 export type TicketWorkflowInput = z.input<typeof ticketWorkflowInputSchema>;
 
@@ -58,14 +48,27 @@ export const projectItemSnapshotSchema = z.object({
   projectItemId: projectItemIdSchema,
   projectId: z.string().min(1),
   updatedAt: z.string().min(1),
-  status: ticketStatusSchema,
+  status: boardStateKeySchema,
   ticket: ticketContextSchema,
 });
 
-export const projectChangeEventSchema = z.object({
-  snapshot: projectItemSnapshotSchema,
-  reason: z.string().optional(),
-});
+export const projectChangeEventSchema = z.discriminatedUnion("kind", [
+  z.strictObject({
+    kind: z.literal("present"),
+    snapshot: projectItemSnapshotSchema,
+    reason: z.string().optional(),
+  }),
+  z.strictObject({
+    kind: z.literal("removed"),
+    projectItemId: projectItemIdSchema,
+    reason: z.string().optional(),
+  }),
+  z.strictObject({
+    kind: z.literal("unreadable"),
+    projectItemId: projectItemIdSchema,
+    reason: z.string().optional(),
+  }),
+]);
 export type ProjectChangeEvent = z.infer<typeof projectChangeEventSchema>;
 
 export const approvalDecisionEventSchema = z.object({
@@ -91,6 +94,10 @@ export const agentUsageAuditSchema = z.object({
 
 export const executionAuditRecordSchema = z.object({
   executionId: executionIdSchema,
+  declarationDigest: sha256DigestSchema,
+  workflowProfile: z.string().min(1),
+  agentProfile: z.string().min(1),
+  agentProfileDigest: sha256DigestSchema,
   harness: harnessKindSchema,
   purpose: z.string().min(1),
   packageDigest: z.string().regex(/^[a-f0-9]{64}$/),
@@ -114,9 +121,15 @@ export type Audited<Value> = {
   audit: ExecutionAuditRecord;
 };
 
-export type BlueprintActivityInput = {
+export type AgentActivityContext = {
+  agent: AgentProfileSnapshot;
+  skillSelectors: SkillSelector[];
+  declarationDigest: string;
+  workflowProfile: string;
+};
+
+export type BlueprintActivityInput = AgentActivityContext & {
   executionId: ExecutionId;
-  harness: HarnessKind;
   ticket: ProjectItemSnapshot["ticket"];
   baseBranch: string;
   priorBlueprint?: Blueprint;
@@ -125,9 +138,8 @@ export type BlueprintActivityInput = {
   reviewSynthesis?: ReviewSynthesis;
 };
 
-export type ImplementationActivityInput = {
+export type ImplementationActivityInput = AgentActivityContext & {
   executionId: ExecutionId;
-  harness: HarnessKind;
   ticket: ProjectItemSnapshot["ticket"];
   blueprint: Blueprint;
   baseBranch: string;
@@ -135,9 +147,8 @@ export type ImplementationActivityInput = {
   reviewSynthesis?: ReviewSynthesis;
 };
 
-export type ReviewActivityInput = {
+export type ReviewActivityInput = AgentActivityContext & {
   executionId: ExecutionId;
-  harness: HarnessKind;
   ticket: ProjectItemSnapshot["ticket"];
   blueprint: Blueprint;
   implementation: ImplementationResult;
@@ -145,9 +156,8 @@ export type ReviewActivityInput = {
   reviewRunId: ReviewRunId;
 };
 
-export type SynthesisActivityInput = {
+export type SynthesisActivityInput = AgentActivityContext & {
   executionId: ExecutionId;
-  harness: HarnessKind;
   ticket: ProjectItemSnapshot["ticket"];
   blueprint: Blueprint;
   implementation: ImplementationResult;
@@ -155,9 +165,8 @@ export type SynthesisActivityInput = {
   reviewerResults: ReviewerResult[];
 };
 
-export type RepairActivityInput = {
+export type RepairActivityInput = AgentActivityContext & {
   executionId: ExecutionId;
-  harness: HarnessKind;
   ticket: ProjectItemSnapshot["ticket"];
   blueprint: Blueprint;
   implementation: ImplementationResult;
@@ -174,6 +183,10 @@ export type TransitionProjectStatusResult =
 export type MergeActivityInput = {
   ticket: ProjectItemSnapshot["ticket"];
   implementation: ImplementationResult;
+};
+
+export type CloseSourceIssueInput = {
+  ticket: ProjectItemSnapshot["ticket"];
 };
 
 export type MaterializeDeferredFindingInput = {
@@ -201,6 +214,7 @@ export type PublishBlueprintInput = {
 export type TicketWorkflowState = {
   run?: TicketRun;
   latestProjectSnapshot?: ProjectItemSnapshot;
+  projectItemAvailability: "present" | "unreadable" | "removed";
   auditTrail: ExecutionAuditRecord[];
   activeExecutionIds: ExecutionId[];
 };
@@ -223,6 +237,7 @@ export type TicketActivities = {
   materializeDeferredFinding(input: MaterializeDeferredFindingInput): Promise<DeferredIssueRef>;
   getMergeReadiness(input: MergeActivityInput): Promise<MergeReadiness>;
   merge(input: MergeActivityInput): Promise<string>;
+  closeSourceIssue(input: CloseSourceIssueInput): Promise<void>;
   publishRunSummary(input: RunSummaryInput): Promise<void>;
 };
 

@@ -1,0 +1,307 @@
+{
+  "apiVersion": "thor.dev/v1alpha1",
+  "kind": "DeliveryProject",
+  "metadata": {
+    "name": "default-delivery",
+    "version": "1.0.0"
+  },
+  "github": {
+    "owner": "example",
+    "ownerType": "organization",
+    "projectNumber": 1,
+    "title": "Thor Delivery",
+    "shortDescription": "Autonomous software delivery managed by Thor",
+    "visibility": "private",
+    "repositories": [{ "owner": "example", "name": "service", "baseBranch": "main" }],
+    "fields": {
+      "lifecycle": {
+        "type": "single_select",
+        "name": "Thor Status",
+        "requiredOnItems": true,
+        "options": {
+          "backlog": { "name": "Backlog", "color": "GRAY" },
+          "discovery": { "name": "Discovery", "color": "PURPLE" },
+          "design_blueprint": { "name": "Design / Blueprint", "color": "BLUE" },
+          "awaiting_blueprint_approval": {
+            "name": "Awaiting Blueprint Approval",
+            "color": "YELLOW"
+          },
+          "ready": { "name": "Ready", "color": "GREEN" },
+          "in_progress": { "name": "In Progress", "color": "BLUE" },
+          "ready_for_review": { "name": "Ready for Review", "color": "PURPLE" },
+          "in_review": { "name": "In Review", "color": "PURPLE" },
+          "repairing": { "name": "Repairing", "color": "ORANGE" },
+          "re_review": { "name": "Re-review", "color": "PURPLE" },
+          "automated_review_passed": {
+            "name": "Automated Review Passed",
+            "color": "GREEN"
+          },
+          "awaiting_human_merge_review": {
+            "name": "Awaiting Human Merge Review",
+            "color": "YELLOW"
+          },
+          "materializing_deferrals": {
+            "name": "Materializing Deferrals",
+            "color": "PURPLE"
+          },
+          "ready_to_merge": { "name": "Ready to Merge", "color": "GREEN" },
+          "merging": { "name": "Merging", "color": "BLUE" },
+          "done": { "name": "Done", "color": "GREEN" },
+          "blocked": { "name": "Blocked", "color": "RED" },
+          "cancelled": { "name": "Cancelled", "color": "GRAY" }
+        }
+      },
+      "workType": {
+        "type": "single_select",
+        "name": "Work Type",
+        "requiredOnItems": true,
+        "options": {
+          "feature": { "name": "Feature", "color": "BLUE" },
+          "bug": { "name": "Bug", "color": "RED" },
+          "task": { "name": "Task", "color": "GRAY" },
+          "spike": { "name": "Spike", "color": "PURPLE" },
+          "chore": { "name": "Chore", "color": "YELLOW" },
+          "documentation": { "name": "Documentation", "color": "GREEN" }
+        }
+      },
+      "priority": {
+        "type": "single_select",
+        "name": "Priority",
+        "requiredOnItems": true,
+        "options": {
+          "P0": { "name": "P0", "color": "RED" },
+          "P1": { "name": "P1", "color": "ORANGE" },
+          "P2": { "name": "P2", "color": "YELLOW" },
+          "P3": { "name": "P3", "color": "GRAY" }
+        }
+      },
+      "component": {
+        "type": "text",
+        "name": "Component / Area",
+        "requiredOnItems": false
+      },
+      "executionMode": {
+        "type": "single_select",
+        "name": "Execution Mode",
+        "requiredOnItems": true,
+        "options": {
+          "human": { "name": "Human", "color": "GRAY" },
+          "agent": { "name": "Agent", "color": "BLUE" },
+          "human_and_agent": { "name": "Human + Agent", "color": "PURPLE" },
+          "disabled": { "name": "Disabled", "color": "RED" }
+        }
+      },
+      "planningDepth": {
+        "type": "single_select",
+        "name": "Planning Depth",
+        "requiredOnItems": true,
+        "options": {
+          "none": { "name": "None", "color": "GRAY" },
+          "light": { "name": "Light", "color": "YELLOW" },
+          "full": { "name": "Full", "color": "BLUE" },
+          "architecture_review": { "name": "Architecture Review", "color": "PURPLE" }
+        }
+      },
+      "approvalPolicy": {
+        "type": "single_select",
+        "name": "Approval Policy",
+        "requiredOnItems": true,
+        "options": {
+          "autonomous": { "name": "Autonomous", "color": "GREEN" },
+          "blueprint_review": { "name": "Blueprint Review", "color": "YELLOW" },
+          "pre_merge_review": { "name": "Pre-Merge Review", "color": "ORANGE" },
+          "blueprint_and_pre_merge_review": {
+            "name": "Blueprint + Pre-Merge Review",
+            "color": "RED"
+          }
+        }
+      },
+      "agentPolicy": {
+        "type": "single_select",
+        "name": "Agent Policy",
+        "requiredOnItems": true,
+        "options": {
+          "disabled": { "name": "Disabled", "color": "RED" },
+          "allowed": { "name": "Allowed", "color": "YELLOW" },
+          "preferred": { "name": "Preferred", "color": "BLUE" },
+          "required": { "name": "Required", "color": "GREEN" }
+        }
+      },
+      "severity": {
+        "type": "single_select",
+        "name": "Severity",
+        "requiredOnItems": false,
+        "options": {
+          "info": { "name": "Info", "color": "GRAY" },
+          "low": { "name": "Low", "color": "BLUE" },
+          "medium": { "name": "Medium", "color": "YELLOW" },
+          "high": { "name": "High", "color": "ORANGE" },
+          "critical": { "name": "Critical", "color": "RED" }
+        }
+      }
+    },
+    "views": {
+      "delivery-board": {
+        "name": "Delivery board",
+        "layout": "BOARD_LAYOUT",
+        "visibleFields": [
+          "lifecycle",
+          "workType",
+          "priority",
+          "component",
+          "approvalPolicy",
+          "agentPolicy"
+        ]
+      },
+      "delivery-table": {
+        "name": "Delivery table",
+        "layout": "TABLE_LAYOUT",
+        "visibleFields": [
+          "lifecycle",
+          "workType",
+          "priority",
+          "component",
+          "executionMode",
+          "planningDepth",
+          "approvalPolicy",
+          "agentPolicy"
+        ]
+      }
+    }
+  },
+  "ticketDefaults": {
+    "workType": "task",
+    "priority": "P2",
+    "executionMode": "agent",
+    "planningDepth": "full",
+    "approvalPolicy": "autonomous",
+    "agentPolicy": "preferred",
+    "autonomousRepairBudget": 3
+  },
+  "workflow": {
+    "id": "software-delivery",
+    "implementation": "ticket-delivery/v1",
+    "version": "1.0.0",
+    "board": {
+      "states": {
+        "backlog": "backlog",
+        "discovery": "discovery",
+        "design_blueprint": "design_blueprint",
+        "awaiting_blueprint_approval": "awaiting_blueprint_approval",
+        "ready": "ready",
+        "in_progress": "in_progress",
+        "ready_for_review": "ready_for_review",
+        "in_review": "in_review",
+        "repairing": "repairing",
+        "re_review": "re_review",
+        "automated_review_passed": "automated_review_passed",
+        "awaiting_human_merge_review": "awaiting_human_merge_review",
+        "materializing_deferrals": "materializing_deferrals",
+        "ready_to_merge": "ready_to_merge",
+        "merging": "merging",
+        "done": "done",
+        "blocked": "blocked",
+        "cancelled": "cancelled"
+      },
+      "entrypoints": {
+        "blueprint": ["design_blueprint"],
+        "implementation": ["ready"]
+      },
+      "controls": { "blocked": "blocked", "cancelled": "cancelled" },
+      "approvals": {
+        "blueprint": {
+          "approved": "ready",
+          "changesRequested": "design_blueprint"
+        },
+        "merge": {
+          "approved": "ready_to_merge",
+          "changesRequested": "repairing"
+        }
+      }
+    },
+    "reviewers": [
+      "correctness",
+      "architecture",
+      "security",
+      "performance",
+      "testing",
+      "api_compatibility",
+      "data_migration",
+      "observability",
+      "maintainability",
+      "product_specification"
+    ],
+    "agents": {
+      "blueprint": "planning-primary",
+      "implementation": "coding-primary",
+      "review": "review-primary",
+      "synthesis": "planning-primary",
+      "repair": "coding-primary"
+    },
+    "interventions": {
+      "ticketChanges": "replan",
+      "dependencyChanges": "replan",
+      "unexpectedStatuses": "block",
+      "unreadableItems": { "action": "block", "afterConsecutivePolls": 3 },
+      "removedItems": "orphan"
+    },
+    "dependencies": {
+      "completion": "issue_closed_and_project_done",
+      "closeIssueAfterMerge": true
+    }
+  },
+  "agents": {
+    "planning-primary": {
+      "harness": "claude",
+      "resourceProfile": "default",
+      "configuration": { "maxTurns": "80", "permissionMode": "plan" }
+    },
+    "coding-primary": {
+      "harness": "codex",
+      "resourceProfile": "default",
+      "configuration": {
+        "approvalPolicy": "never",
+        "networkAccessEnabled": "false",
+        "sandboxMode": "workspace-write"
+      }
+    },
+    "review-primary": {
+      "harness": "claude",
+      "resourceProfile": "default",
+      "configuration": { "maxTurns": "40", "permissionMode": "plan" }
+    }
+  },
+  "skillSelectors": [
+    {
+      "skill": "security",
+      "reason": "ticket or phase context indicates security-sensitive work",
+      "match": {
+        "riskFlags": ["security_sensitive"],
+        "keywords": ["auth", "secure", "security", "secret", "permission"]
+      }
+    },
+    {
+      "skill": "data-migration",
+      "reason": "ticket or phase context indicates data or migration work",
+      "match": {
+        "riskFlags": ["destructive_migration"],
+        "keywords": ["database", "schema", "migration", "data"]
+      }
+    },
+    {
+      "skill": "api-compatibility",
+      "reason": "ticket or phase context indicates API or compatibility work",
+      "match": {
+        "keywords": ["api", "compatibility", "endpoint", "protocol"]
+      }
+    },
+    {
+      "skill": "regression-testing",
+      "reason": "ticket or phase context requires regression-focused verification",
+      "match": {
+        "workTypes": ["bug"],
+        "keywords": ["test", "regression", "flaky"]
+      }
+    }
+  ]
+}
