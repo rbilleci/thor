@@ -46,6 +46,10 @@ combined worker needs:
 - repository contents read/write access for branches and merge;
 - metadata read access.
 
+Thor pins REST requests to GitHub API version `2026-03-10` rather than relying on GitHub's
+deprecated unversioned default. Set `GITHUB_API_VERSION` explicitly when a GitHub Enterprise Server
+deployment supports a different API version.
+
 Subscribe the App webhook to Projects v2 item changes. Use a high-entropy webhook secret of at least
 16 characters. Put the App private key in a filesystem secret and configure its path; do not place
 the private-key contents in `.env`.

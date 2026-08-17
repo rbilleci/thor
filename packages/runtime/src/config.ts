@@ -41,6 +41,10 @@ const environmentSchema = z.object({
   GITHUB_APP_PRIVATE_KEY_PATH: optionalString,
   GITHUB_APP_INSTALLATION_ID: optionalPositiveInteger,
   GITHUB_API_URL: optionalUrl,
+  GITHUB_API_VERSION: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .default("2026-03-10"),
   GITHUB_PROJECT_ID: z.string().min(1),
   GITHUB_STATUS_FIELD_ID: z.string().min(1),
   GITHUB_STATUS_OPTIONS_JSON: z.string().min(2),
@@ -88,6 +92,7 @@ export type RuntimeConfiguration = {
     project: GitHubProjectConfiguration;
     deferredFields: DeferredFieldRouting;
     apiUrl?: string;
+    apiVersion: string;
   };
   paths: {
     sourceRoot: string;
@@ -121,6 +126,7 @@ export async function loadRuntimeConfiguration(
         statusOptions,
       },
       deferredFields,
+      apiVersion: parsed.GITHUB_API_VERSION,
       ...(parsed.GITHUB_API_URL === undefined ? {} : { apiUrl: parsed.GITHUB_API_URL }),
     },
     paths: {

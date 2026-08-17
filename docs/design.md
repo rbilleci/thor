@@ -237,7 +237,8 @@ be richer than the default Kanban board.
 
 ### Core planning fields
 
-- **Type**: Feature, Bug, Task, Spike, Chore, Documentation.
+- **Work Type**: Feature, Bug, Task, Spike, Chore, Documentation. Thor also accepts `Type` on
+  existing Projects, but new GitHub Projects reserve that field name.
 - **Priority**: P0, P1, P2, P3.
 - **Effort**: XS, S, M, L, XL.
 - **Iteration**: native GitHub iteration field.

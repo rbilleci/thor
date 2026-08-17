@@ -43,7 +43,10 @@ export type OctokitGatewayOptions = {
   auth: GitHubAuth;
   project: GitHubProjectConfiguration;
   apiUrl?: string;
+  apiVersion?: string;
 };
+
+export const DEFAULT_GITHUB_API_VERSION = "2026-03-10";
 
 const projectItemQuery = `
   query ThorProjectItem($id: ID!) {
@@ -572,18 +575,7 @@ function mapProjectItem(
     issueNumber: content.number,
     title: redactKnownSecrets(content.title),
     body: redactKnownSecrets(content.body ?? ""),
-    workType: parseEnumField<WorkType>(
-      fields.get("Type"),
-      {
-        feature: "feature",
-        bug: "bug",
-        task: "task",
-        spike: "spike",
-        chore: "chore",
-        documentation: "documentation",
-      },
-      "task",
-    ),
+    workType: mapWorkTypeField(fields),
     priority: parseEnumField<Priority>(
       fields.get("Priority"),
       { p0: "P0", p1: "P1", p2: "P2", p3: "P3" },
@@ -649,6 +641,22 @@ function mapProjectItem(
   };
 }
 
+/** Maps the legacy Type field and GitHub-compatible Work Type alias into Thor's domain. */
+export function mapWorkTypeField(fields: ReadonlyMap<string, string>): WorkType {
+  return parseEnumField<WorkType>(
+    fields.get("Type") ?? fields.get("Work Type"),
+    {
+      feature: "feature",
+      bug: "bug",
+      task: "task",
+      spike: "spike",
+      chore: "chore",
+      documentation: "documentation",
+    },
+    "task",
+  );
+}
+
 function parseStatus(value: string): TicketStatus {
   const normalized = value
     .trim()
@@ -696,18 +704,28 @@ function extractAcceptanceCriteria(body: string): string[] {
 
 function createOctokit(options: OctokitGatewayOptions): Octokit {
   const baseUrl = options.apiUrl;
+  const apiVersion = options.apiVersion ?? DEFAULT_GITHUB_API_VERSION;
+  let octokit: Octokit;
   if (options.auth.kind === "token") {
-    return new Octokit({ auth: options.auth.token, ...(baseUrl === undefined ? {} : { baseUrl }) });
+    octokit = new Octokit({
+      auth: options.auth.token,
+      ...(baseUrl === undefined ? {} : { baseUrl }),
+    });
+  } else {
+    octokit = new Octokit({
+      authStrategy: createAppAuth,
+      auth: {
+        appId: options.auth.appId,
+        privateKey: options.auth.privateKey,
+        installationId: options.auth.installationId,
+      },
+      ...(baseUrl === undefined ? {} : { baseUrl }),
+    });
   }
-  return new Octokit({
-    authStrategy: createAppAuth,
-    auth: {
-      appId: options.auth.appId,
-      privateKey: options.auth.privateKey,
-      installationId: options.auth.installationId,
-    },
-    ...(baseUrl === undefined ? {} : { baseUrl }),
+  octokit.hook.before("request", (request) => {
+    request.headers["x-github-api-version"] = apiVersion;
   });
+  return octokit;
 }
 
 function idempotencyMarker(key: string): string {

@@ -4,6 +4,7 @@ import { projectItemIdSchema, type TicketContext } from "@thor/domain";
 import { describe, expect, it } from "vitest";
 
 import { FakeGitHubGateway } from "./fake.js";
+import { mapWorkTypeField } from "./octokit-gateway.js";
 import type { ProjectItemSnapshot } from "./types.js";
 import { parseProjectWebhook, verifyWebhookSignature } from "./webhook.js";
 
@@ -93,6 +94,20 @@ describe("FakeGitHubGateway", () => {
       await gateway.ensureDeferredIssue(draft),
     );
     expect(gateway.mutationCounts.deferredIssues).toBe(1);
+  });
+});
+
+describe("GitHub Project field mapping", () => {
+  it("accepts the creatable Work Type alias and preserves legacy Type precedence", () => {
+    expect(mapWorkTypeField(new Map([["Work Type", "Feature"]]))).toBe("feature");
+    expect(
+      mapWorkTypeField(
+        new Map([
+          ["Type", "Bug"],
+          ["Work Type", "Feature"],
+        ]),
+      ),
+    ).toBe("bug");
   });
 });
 
