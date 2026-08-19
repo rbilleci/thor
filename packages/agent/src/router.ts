@@ -6,6 +6,8 @@ import {
   agentExecutionResultSchema,
   type AgentExecutionRequest,
   type AgentExecutionResult,
+  type AgentControl,
+  type AgentEventSink,
   type AgentHarness,
 } from "./types.js";
 
@@ -18,6 +20,8 @@ export class HarnessRouter {
 
   public async execute(
     request: AgentExecutionRequest,
+    events: AgentEventSink,
+    controls: AsyncIterable<AgentControl>,
     signal: AbortSignal,
   ): Promise<AgentExecutionResult> {
     const parsedRequest = agentExecutionRequestSchema.parse(request);
@@ -29,7 +33,9 @@ export class HarnessRouter {
         "invalid_request",
       );
     }
-    const result = agentExecutionResultSchema.parse(await harness.execute(parsedRequest, signal));
+    const result = agentExecutionResultSchema.parse(
+      await harness.execute(parsedRequest, events, controls, signal),
+    );
     if (
       result.executionId !== parsedRequest.package.executionId ||
       result.harness !== parsedRequest.package.harness ||
@@ -58,12 +64,21 @@ export class FakeHarness implements AgentHarness {
 
   public async execute(
     request: AgentExecutionRequest,
+    events: AgentEventSink,
+    controls: AsyncIterable<AgentControl>,
     signal: AbortSignal,
   ): Promise<AgentExecutionResult> {
     if (signal.aborted) {
       throw new AgentExecutionError("agent execution cancelled", false, "cancelled");
     }
     this.calls.push(request);
+    await events.publish({
+      kind: "session_started",
+      providerSessionId: `${this.kind}-${request.package.executionId}`,
+    });
+    await events.publish({ kind: "turn_started", turn: 1 });
+    await events.publish({ kind: "turn_completed", turn: 1 });
+    void controls;
     return Promise.resolve({
       executionId: request.package.executionId,
       harness: this.kind,

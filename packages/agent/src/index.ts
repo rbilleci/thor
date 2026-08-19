@@ -5,3 +5,4 @@ export * from "./package-builder.js";
 export * from "./prompt.js";
 export * from "./router.js";
 export * from "./types.js";
+export * from "./control-queue.js";

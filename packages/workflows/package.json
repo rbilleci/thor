@@ -21,6 +21,7 @@
     "@thor/config": "0.1.0",
     "@thor/domain": "0.1.0",
     "@thor/github": "0.1.0",
+    "@thor/slack": "0.1.0",
     "zod": "4.4.3"
   },
   "devDependencies": {

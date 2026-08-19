@@ -42,7 +42,18 @@ const environmentSchema = z.object({
   THOR_PROJECT_DECLARATION: z.string().min(1).default("./config/delivery-project.json"),
   THOR_SOURCE_ROOT: z.string().min(1).default("./repositories"),
   THOR_WORKTREE_ROOT: z.string().min(1).default("./.thor-worktrees"),
+  THOR_EXECUTION_ROOT: z.string().min(1).default("./.thor-executions"),
   THOR_RESOURCE_ROOT: z.string().min(1).default("./resources"),
+  SLACK_BOT_TOKEN: optionalString,
+  SLACK_BOT_USER_ID: z.preprocess(
+    emptyToUndefined,
+    z
+      .string()
+      .regex(/^[UW][A-Z0-9]+$/)
+      .optional(),
+  ),
+  THOR_SLACK_GATEWAY_URL: optionalUrl,
+  THOR_SLACK_CONTROL_TOKEN: optionalString,
 });
 
 const temporalEnvironmentSchema = environmentSchema.pick({
@@ -79,7 +90,14 @@ export type RuntimeConfiguration = {
   paths: {
     sourceRoot: string;
     worktreeRoot: string;
+    executionRoot: string;
     resourceRoot: string;
+  };
+  slack?: {
+    botToken: string;
+    botUserId: string;
+    gatewayUrl?: string;
+    controlToken?: string;
   };
 };
 
@@ -91,6 +109,23 @@ export async function loadRuntimeConfiguration(
   const control = await loadProjectControlConfiguration(environment, cwd);
   const manager = createProjectConfigurationManager(control);
   const binding = await manager.validate(control.declaration);
+  const slack = binding.delivery.collaboration.slack;
+  if (
+    slack.enabled &&
+    (parsed.SLACK_BOT_TOKEN === undefined || parsed.SLACK_BOT_USER_ID === undefined)
+  ) {
+    throw new Error(
+      "SLACK_BOT_TOKEN and SLACK_BOT_USER_ID are required when Slack collaboration is enabled",
+    );
+  }
+  if (
+    (parsed.THOR_SLACK_GATEWAY_URL === undefined) !==
+    (parsed.THOR_SLACK_CONTROL_TOKEN === undefined)
+  ) {
+    throw new Error(
+      "THOR_SLACK_GATEWAY_URL and THOR_SLACK_CONTROL_TOKEN must be configured together",
+    );
+  }
   return {
     temporal: {
       address: parsed.TEMPORAL_ADDRESS,
@@ -116,8 +151,25 @@ export async function loadRuntimeConfiguration(
     paths: {
       sourceRoot: path.resolve(cwd, parsed.THOR_SOURCE_ROOT),
       worktreeRoot: path.resolve(cwd, parsed.THOR_WORKTREE_ROOT),
+      executionRoot: path.resolve(cwd, parsed.THOR_EXECUTION_ROOT),
       resourceRoot: path.resolve(cwd, parsed.THOR_RESOURCE_ROOT),
     },
+    ...(slack.enabled &&
+    parsed.SLACK_BOT_TOKEN !== undefined &&
+    parsed.SLACK_BOT_USER_ID !== undefined
+      ? {
+          slack: {
+            botToken: parsed.SLACK_BOT_TOKEN,
+            botUserId: parsed.SLACK_BOT_USER_ID,
+            ...(parsed.THOR_SLACK_GATEWAY_URL === undefined
+              ? {}
+              : { gatewayUrl: parsed.THOR_SLACK_GATEWAY_URL }),
+            ...(parsed.THOR_SLACK_CONTROL_TOKEN === undefined
+              ? {}
+              : { controlToken: parsed.THOR_SLACK_CONTROL_TOKEN }),
+          },
+        }
+      : {}),
   };
 }
 

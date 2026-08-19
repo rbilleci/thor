@@ -29,6 +29,7 @@ target/
 # Local repository mirrors and isolated agent worktrees
 repositories/
 .thor-worktrees/
+.thor-executions/
 .thor-live-runs/
 
 # Operating-system metadata

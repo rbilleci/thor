@@ -3,6 +3,8 @@ import path from "node:path";
 
 import {
   AgentExecutionError,
+  type AgentControl,
+  type AgentEventSink,
   type AgentExecutionRequest,
   type AgentExecutionResult,
   type AgentHarness,
@@ -34,9 +36,17 @@ export class ScriptedLiveHarness implements AgentHarness {
 
   public async execute(
     request: AgentExecutionRequest,
+    events: AgentEventSink,
+    controls: AsyncIterable<AgentControl>,
     signal: AbortSignal,
   ): Promise<AgentExecutionResult> {
+    void controls;
     if (signal.aborted) throw signal.reason;
+    await events.publish({
+      kind: "session_started",
+      providerSessionId: `${this.kind}-${request.package.executionId}`,
+    });
+    await events.publish({ kind: "turn_started", turn: 1 });
     const purpose = request.package.purpose;
     let structuredOutput: unknown;
     switch (purpose.kind) {
@@ -171,6 +181,7 @@ export class ScriptedLiveHarness implements AgentHarness {
         break;
       }
     }
+    await events.publish({ kind: "turn_completed", turn: 1 });
     return {
       executionId: request.package.executionId,
       harness: this.kind,

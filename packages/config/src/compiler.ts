@@ -77,6 +77,7 @@ export function compileRuntimeDeliveryProfile(rawDeclaration: unknown): RuntimeD
     workflow: declaration.workflow,
     agents: resolveAgents(declaration),
     skillSelectors: declaration.skillSelectors,
+    collaboration: declaration.collaboration,
   };
 }
 

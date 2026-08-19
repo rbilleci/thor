@@ -1,13 +1,19 @@
 import { createHash } from "node:crypto";
 
-import { cancellationSignal, heartbeat } from "@temporalio/activity";
+import { activityInfo, cancellationSignal, heartbeat } from "@temporalio/activity";
 import { ApplicationFailure, CancelledFailure } from "@temporalio/common";
 import {
   AgentExecutionError,
   ExecutionPackageBuilder,
   HarnessRouter,
   PackageBuildError,
+  agentControlSourceReferenceSchema,
+  noAgentControls,
+  type AgentControl,
+  type AgentControlSourceReference,
+  type AgentEventSink,
   type AgentExecutionResult,
+  type AgentResponseContext,
 } from "@thor/agent";
 import {
   blueprintSchema,
@@ -28,6 +34,24 @@ import {
   type TicketContext,
 } from "@thor/domain";
 import { GitHubError, type DeferredProjectField, type GitHubGateway } from "@thor/github";
+import {
+  SlackApiError,
+  SlackControlClient,
+  SlackSurfaceManager,
+  SlackTranscriptSink,
+  parseSlackCommand,
+  slackCommandContainsSecret,
+  slackCommandDigest,
+  slackCommandReferenceSchema,
+  slackTimestampSchema,
+  slackUserIdSchema,
+  slackWorkspaceIdSchema,
+  type SlackApi,
+  type SlackCommandReference,
+  type SlackMessage,
+  type SlackTaskSurface,
+  type SlackTimestamp,
+} from "@thor/slack";
 import { z } from "zod";
 
 import {
@@ -38,16 +62,20 @@ import {
   type Audited,
   type BlueprintActivityInput,
   type ExecutionAuditRecord,
+  type RegisterTicketSlackSurfaceInput,
   type ImplementationActivityInput,
   type MaterializeDeferredFindingInput,
   type PublishBlueprintInput,
+  type PublishTicketSlackLinkInput,
   type RepairActivityInput,
   type ReviewActivityInput,
   type RunSummaryInput,
   type SynthesisActivityInput,
   type TicketActivities,
   type TransitionProjectStatusResult,
+  type UpdateTicketSlackSurfaceInput,
 } from "./contracts.js";
+import type { AgentExecutionCheckpoint, ExecutionCheckpointStore } from "./execution-checkpoint.js";
 import { WorkspaceError, type WorkspaceManager } from "./workspace.js";
 
 const synthesisAgentOutputSchema = z.object({
@@ -82,15 +110,46 @@ const synthesisAgentOutputSchema = z.object({
   fullReReview: z.boolean(),
 });
 
+const agentActivityHeartbeatSchema = z
+  .object({
+    executionId: z.string().min(1),
+    providerSessionId: z.string().min(1).optional(),
+    providerTurn: z.number().int().nonnegative().optional(),
+    slackMessageTs: z
+      .string()
+      .regex(/^\d{10,}\.\d{6}$/)
+      .optional(),
+    lastItemId: z.string().min(1).optional(),
+    appliedCommandIds: z.array(z.string().min(1)).max(100).default([]),
+    pendingControlReferences: z.array(agentControlSourceReferenceSchema).max(100).default([]),
+  })
+  .loose();
+
 export type TicketActivityDependencies = {
   github: GitHubGateway;
   harnesses: HarnessRouter;
   packageBuilder: ExecutionPackageBuilder;
   workspaces: WorkspaceManager;
+  checkpoints?: ExecutionCheckpointStore;
+  slack?: {
+    api: SlackApi;
+    botUserId: string;
+    surfaces: SlackSurfaceManager;
+    workflows: SlackWorkflowRegistrationGateway;
+    control?: {
+      gatewayUrl: string;
+      serviceToken: string;
+    };
+  };
   deferredProjectFields?: (
     finding: NormalizedFinding,
     ticket: TicketContext,
   ) => DeferredProjectField[];
+};
+
+export type SlackWorkflowRegistrationGateway = {
+  register(input: RegisterTicketSlackSurfaceInput): Promise<void>;
+  close(input: RegisterTicketSlackSurfaceInput): Promise<void>;
 };
 
 export function createTicketActivities(dependencies: TicketActivityDependencies): TicketActivities {
@@ -456,6 +515,71 @@ export function createTicketActivities(dependencies: TicketActivityDependencies)
         throw toApplicationFailure(error);
       }
     },
+
+    async ensureTicketSlackSurface(input) {
+      const slack = requireSlack(dependencies);
+      return withActivityFailure(() =>
+        slack.surfaces.ensure({
+          workspaceId: input.slack.workspaceId,
+          messaging: input.slack.messaging,
+          workflowId: input.workflowId,
+          projectItemId: input.projectItemId,
+          repository: input.ticket.repository,
+          issueNumber: input.ticket.issueNumber,
+          ticketTitle: input.ticket.title,
+          status: input.status,
+          ...(input.pullRequestNumber === undefined
+            ? {}
+            : { pullRequestNumber: input.pullRequestNumber }),
+        }),
+      );
+    },
+
+    async registerTicketSlackSurface(input) {
+      const slack = requireSlack(dependencies);
+      await withActivityFailure(() => slack.workflows.register(input));
+    },
+
+    async publishTicketSlackLink(input) {
+      await withActivityFailure(() =>
+        dependencies.github.upsertComment({
+          repository: input.ticket.repository,
+          issueNumber: input.ticket.issueNumber,
+          idempotencyKey: `${input.workflowId}:slack-surface`,
+          body: slackLinkComment(input),
+        }),
+      );
+    },
+
+    async updateTicketSlackSurface(input) {
+      const slack = requireSlack(dependencies);
+      await withActivityFailure(async () => {
+        await slack.surfaces.update(input.surface, {
+          workspaceId: input.slack.workspaceId,
+          messaging: input.slack.messaging,
+          workflowId: input.workflowId,
+          projectItemId: input.projectItemId,
+          repository: input.ticket.repository,
+          issueNumber: input.ticket.issueNumber,
+          ticketTitle: input.ticket.title,
+          status: input.status,
+          ...(input.pullRequestNumber === undefined
+            ? {}
+            : { pullRequestNumber: input.pullRequestNumber }),
+        });
+        await dependencies.github.upsertComment({
+          repository: input.ticket.repository,
+          issueNumber: input.ticket.issueNumber,
+          idempotencyKey: `${input.workflowId}:slack-surface`,
+          body: slackLinkComment(input),
+        });
+      });
+    },
+
+    async closeTicketSlackSurface(input) {
+      const slack = requireSlack(dependencies);
+      await withActivityFailure(() => slack.workflows.close(input));
+    },
   };
 }
 
@@ -478,32 +602,508 @@ async function executeAgent<Output>(
   outputSchema: z.ZodType<Output>,
   signal: AbortSignal,
 ): Promise<Audited<Output>> {
+  const recoveryGuidance = await loadRecoveryGuidance(dependencies, input);
+  const packagePayload =
+    recoveryGuidance.length === 0
+      ? payload
+      : {
+          ...(isRecord(payload) ? payload : { originalPayload: payload }),
+          humanSlackGuidance: recoveryGuidance,
+        };
   const executionPackage = await dependencies.packageBuilder.build({
     executionId: input.executionId,
     agent: input.agent,
     purpose,
     ticket: input.ticket,
-    payload,
+    payload: packagePayload,
     skillSelectors: input.skillSelectors,
   });
-  heartbeat({ phase: "agent_started", executionId: input.executionId, purpose: purpose.kind });
-  const heartbeatTimer = setInterval(() => {
-    heartbeat({ phase: "agent_running", executionId: input.executionId, purpose: purpose.kind });
-  }, 30_000);
+  const info = activityInfo();
+  const parsedHeartbeat = agentActivityHeartbeatSchema.safeParse(info.heartbeatDetails);
+  const previousHeartbeat =
+    parsedHeartbeat.success && parsedHeartbeat.data.executionId === input.executionId
+      ? parsedHeartbeat.data
+      : undefined;
+  const storedCheckpoint = await dependencies.checkpoints?.load(input.executionId);
+  const previousCheckpoint =
+    storedCheckpoint?.packageDigest === executionPackage.digest ? storedCheckpoint : undefined;
+  let providerSessionId =
+    previousCheckpoint?.providerSessionId ?? previousHeartbeat?.providerSessionId;
+  let providerTurn = previousCheckpoint?.providerTurn ?? previousHeartbeat?.providerTurn;
+  let slackMessageTs = previousCheckpoint?.slackMessageTs ?? previousHeartbeat?.slackMessageTs;
+  let lastItemId = previousCheckpoint?.lastItemId ?? previousHeartbeat?.lastItemId;
+  const appliedCommandIds = new Set([
+    ...(previousCheckpoint?.appliedCommandIds ?? []),
+    ...(previousHeartbeat?.appliedCommandIds ?? []),
+  ]);
+  const pendingControlReferences = new Map<string, AgentControlSourceReference>(
+    [
+      ...(previousCheckpoint?.pendingControlReferences ?? []),
+      ...(previousHeartbeat?.pendingControlReferences ?? []),
+    ].map((reference) => [reference.commandId, reference]),
+  );
+  let slackDeliveryDegraded = false;
+
+  const emitHeartbeat = (eventKind?: string): void => {
+    heartbeat({
+      phase: "agent_running",
+      executionId: input.executionId,
+      attempt: info.attempt,
+      purpose: purpose.kind,
+      ...(eventKind === undefined ? {} : { eventKind }),
+      ...(providerSessionId === undefined ? {} : { providerSessionId }),
+      ...(providerTurn === undefined ? {} : { providerTurn }),
+      ...(slackMessageTs === undefined ? {} : { slackMessageTs }),
+      ...(lastItemId === undefined ? {} : { lastItemId }),
+      appliedCommandIds: [...appliedCommandIds].slice(-100),
+      pendingControlReferences: [...pendingControlReferences.values()].slice(-100),
+      slackDeliveryDegraded,
+    });
+  };
+  const persistCheckpoint = async (): Promise<void> => {
+    if (dependencies.checkpoints === undefined) return;
+    const checkpoint: AgentExecutionCheckpoint = {
+      version: 1,
+      executionId: input.executionId,
+      packageDigest: executionPackage.digest,
+      ...(providerSessionId === undefined ? {} : { providerSessionId }),
+      ...(providerTurn === undefined ? {} : { providerTurn }),
+      ...(slackMessageTs === undefined ? {} : { slackMessageTs }),
+      ...(lastItemId === undefined ? {} : { lastItemId }),
+      appliedCommandIds: [...appliedCommandIds].slice(-100),
+      pendingControlReferences: [...pendingControlReferences.values()].slice(-100),
+      updatedAt: new Date().toISOString(),
+    };
+    await dependencies.checkpoints.save(checkpoint);
+  };
+  emitHeartbeat("agent_started");
+  const slack = dependencies.slack;
+  const recoveredCheckpointControls = await loadCheckpointControls(
+    slack,
+    input.slackSession?.surface,
+    [...pendingControlReferences.values()],
+    input.slackSession?.defaultMode,
+  );
+  const resumedTranscriptMessage =
+    slack === undefined || input.slackSession === undefined || slackMessageTs === undefined
+      ? undefined
+      : await loadSlackTranscriptMessage(
+          slack.api,
+          input.slackSession.surface,
+          input.executionId,
+          slackMessageTs,
+        );
+  if (slackMessageTs !== undefined && resumedTranscriptMessage === undefined) {
+    slackMessageTs = undefined;
+  }
+  const transcript =
+    slack === undefined || input.slackSession === undefined
+      ? undefined
+      : new SlackTranscriptSink({
+          slack: slack.api,
+          surface: input.slackSession.surface,
+          executionId: input.executionId,
+          label: agentLabel(purpose, executionPackage.harness, input.executionId),
+          flushIntervalMilliseconds: input.slackSession.flushIntervalMilliseconds,
+          ...(resumedTranscriptMessage === undefined
+            ? {}
+            : { initialMessage: resumedTranscriptMessage }),
+          checkpoint: (checkpoint) => {
+            slackMessageTs = checkpoint.messageTs ?? slackMessageTs;
+            lastItemId = checkpoint.lastItemId ?? lastItemId;
+            slackDeliveryDegraded = checkpoint.degraded;
+            emitHeartbeat("slack_checkpoint");
+          },
+        });
+  const control =
+    slack?.control === undefined || input.slackSession === undefined
+      ? undefined
+      : new SlackControlClient({
+          gatewayUrl: slack.control.gatewayUrl,
+          serviceToken: slack.control.serviceToken,
+          workflowId: input.slackSession.workflowId,
+          executionId: input.executionId,
+          surface: input.slackSession.surface,
+          signal,
+          seenCommandIds: [...appliedCommandIds],
+        });
+  let pendingResponseContext: AgentResponseContext | undefined =
+    input.recoveryCommands === undefined || input.recoveryCommands.length === 0
+      ? recoveredCheckpointControls[0]?.responseContext
+      : responseContextForReference(input.recoveryCommands[0]?.reference);
+  let responseTranscript: SlackTranscriptSink | undefined;
+  let responseDeliveryDegraded = false;
+  const closeResponseTranscript = async (): Promise<void> => {
+    const result = await responseTranscript?.close();
+    responseDeliveryDegraded = responseDeliveryDegraded || result?.degraded === true;
+    responseTranscript = undefined;
+  };
+  const eventSink: AgentEventSink = {
+    publish: async (event) => {
+      if (event.kind === "session_started") providerSessionId = event.providerSessionId;
+      if (event.kind === "turn_started") providerTurn = event.turn;
+      if ("itemId" in event) lastItemId = event.itemId;
+      if (event.kind === "control_applied") {
+        appliedCommandIds.add(event.commandId);
+        if (event.sourceReference !== undefined) {
+          pendingControlReferences.set(event.commandId, event.sourceReference);
+        }
+        pendingResponseContext = event.responseContext ?? pendingResponseContext;
+      }
+      if (event.kind === "control_completed") {
+        pendingControlReferences.delete(event.commandId);
+      }
+      if (
+        event.kind === "turn_started" &&
+        pendingResponseContext !== undefined &&
+        slack !== undefined &&
+        input.slackSession !== undefined
+      ) {
+        await closeResponseTranscript();
+        const responseContext = pendingResponseContext;
+        pendingResponseContext = undefined;
+        responseTranscript = new SlackTranscriptSink({
+          slack: slack.api,
+          surface: input.slackSession.surface,
+          executionId: input.executionId,
+          label: `Response to <@${responseContext.actorId}> · ${agentLabel(
+            purpose,
+            executionPackage.harness,
+            input.executionId,
+          )}`,
+          flushIntervalMilliseconds: input.slackSession.flushIntervalMilliseconds,
+          responseTo: {
+            threadTs: slackTimestampSchema.parse(responseContext.threadId),
+            recipientUserId: slackUserIdSchema.parse(responseContext.actorId),
+            recipientTeamId: slackWorkspaceIdSchema.parse(responseContext.workspaceId),
+          },
+        });
+      }
+      emitHeartbeat(event.kind);
+      await transcript?.publish(event);
+      await responseTranscript?.publish(event);
+      if (event.kind === "turn_completed" || event.kind === "turn_failed") {
+        await closeResponseTranscript();
+      }
+      if (
+        event.kind === "session_started" ||
+        event.kind === "control_applied" ||
+        event.kind === "control_completed" ||
+        event.kind === "turn_completed" ||
+        event.kind === "turn_failed"
+      ) {
+        await persistCheckpoint();
+      }
+      if (event.kind === "control_applied" && control !== undefined) {
+        await control.applied(event.commandId).catch(() => undefined);
+      }
+    },
+  };
+  const heartbeatTimer = setInterval(() => emitHeartbeat(), 5_000);
+  let result: AgentExecutionResult;
+  let value: Output;
+  let finalSlackDelivery: "delivered" | "degraded" | undefined;
   try {
-    const result = await dependencies.harnesses.execute(
-      {
-        package: executionPackage,
-        workspace,
-        outputSchema: jsonSchema(outputSchema),
-      },
-      signal,
-    );
-    const value = outputSchema.parse(redactStructuredSecrets(result.structuredOutput));
-    return { value, audit: auditRecord(result, purpose.kind, executionPackage, input) };
+    if (info.attempt > 1) {
+      await eventSink.publish({
+        kind: "recovery",
+        message:
+          providerSessionId === undefined
+            ? "Activity retry started; provider session will be recreated"
+            : "Activity retry resumed from its execution checkpoint",
+        ...(providerSessionId === undefined ? {} : { previousSessionId: providerSessionId }),
+      });
+    }
+    try {
+      result = await dependencies.harnesses.execute(
+        {
+          package: executionPackage,
+          workspace,
+          ...(providerSessionId === undefined ? {} : { resumeSessionId: providerSessionId }),
+          outputSchema: jsonSchema(outputSchema),
+          ...(recoveredCheckpointControls.length === 0
+            ? {}
+            : { recoveryControls: recoveredCheckpointControls }),
+        },
+        eventSink,
+        control ?? noAgentControls(),
+        signal,
+      );
+    } catch (error) {
+      if (
+        error instanceof AgentExecutionError &&
+        error.code === "session_unavailable" &&
+        providerSessionId !== undefined
+      ) {
+        const unavailableSessionId = providerSessionId;
+        providerSessionId = undefined;
+        providerTurn = undefined;
+        lastItemId = undefined;
+        await eventSink.publish({
+          kind: "recovery",
+          message:
+            "The checkpointed provider session is unavailable; the next Activity attempt will start a new recovery session",
+          previousSessionId: unavailableSessionId,
+        });
+        emitHeartbeat("provider_session_unavailable");
+        await persistCheckpoint();
+      }
+      throw error;
+    }
+    value = outputSchema.parse(redactStructuredSecrets(result.structuredOutput));
+    providerSessionId = result.sessionId ?? providerSessionId;
+    await persistCheckpoint();
   } finally {
     clearInterval(heartbeatTimer);
+    control?.close();
+    await closeResponseTranscript();
+    const transcriptResult = await transcript?.close();
+    if (transcriptResult !== undefined) {
+      slackMessageTs = transcriptResult.messageTs ?? slackMessageTs;
+      slackDeliveryDegraded = transcriptResult.degraded || responseDeliveryDegraded;
+      finalSlackDelivery = slackDeliveryDegraded ? "degraded" : "delivered";
+      emitHeartbeat("agent_finished");
+      await persistCheckpoint();
+    }
   }
+  return {
+    value,
+    audit: auditRecord(result, purpose.kind, executionPackage, input, finalSlackDelivery),
+  };
+}
+
+async function loadRecoveryGuidance(
+  dependencies: TicketActivityDependencies,
+  input: AgentActivityContext,
+): Promise<string[]> {
+  if (input.recoveryCommands === undefined || input.recoveryCommands.length === 0) return [];
+  if (dependencies.slack === undefined || input.slackSession === undefined) {
+    throw new AgentExecutionError(
+      "Slack recovery command cannot be loaded without a Slack runtime and task surface",
+      true,
+      "provider_unavailable",
+    );
+  }
+  const result: string[] = [];
+  for (const accepted of input.recoveryCommands) {
+    const messages = await relevantSlackMessages(
+      dependencies.slack.api,
+      input.slackSession.surface,
+      accepted.reference.threadTs,
+    );
+    const source = messages.find((message) => message.timestamp === accepted.reference.messageTs);
+    const parsed =
+      source === undefined
+        ? undefined
+        : parseSlackCommand(
+            source.text,
+            dependencies.slack.botUserId,
+            input.slackSession.defaultMode,
+          );
+    const receipt = messages.find(
+      (message) =>
+        message.timestamp === accepted.receiptTs &&
+        message.metadata?.eventType === "thor_command_receipt",
+    );
+    const text =
+      parsed?.text ?? (receipt === undefined ? undefined : receiptCommandText(receipt.text));
+    if (text === undefined || slackCommandDigest(text) !== accepted.reference.contentDigest) {
+      throw new AgentExecutionError(
+        `Slack recovery command ${accepted.reference.commandId} is unavailable or changed`,
+        false,
+        "invalid_request",
+      );
+    }
+    result.push(
+      redactKnownSecrets(
+        `${accepted.reference.mode} command ${accepted.reference.commandId}: ${text}`,
+      ),
+    );
+  }
+  return result;
+}
+
+async function loadCheckpointControls(
+  slack: TicketActivityDependencies["slack"],
+  surface: SlackTaskSurface | undefined,
+  references: AgentControlSourceReference[],
+  defaultMode: "queue" | "redirect" | undefined,
+): Promise<AgentControl[]> {
+  if (references.length === 0) return [];
+  if (slack === undefined || surface === undefined || defaultMode === undefined) {
+    throw new AgentExecutionError(
+      "Checkpointed Slack controls cannot be recovered without the configured Slack task surface",
+      true,
+      "provider_unavailable",
+    );
+  }
+  const controls: AgentControl[] = [];
+  for (const rawReference of references) {
+    const reference = slackCommandReferenceSchema.parse(rawReference);
+    const messages = await relevantSlackMessages(slack.api, surface, reference.threadTs);
+    const source = messages.find((message) => message.timestamp === reference.messageTs);
+    const sourceCommand =
+      source?.userId === reference.actorId
+        ? parseSlackCommand(source.text, slack.botUserId, defaultMode)
+        : undefined;
+    const receipt = messages.find(
+      (message) =>
+        message.botId !== undefined &&
+        message.metadata?.eventType === "thor_command_receipt" &&
+        message.metadata.eventPayload.commandId === reference.commandId &&
+        message.metadata.eventPayload.contentDigest === reference.contentDigest,
+    );
+    const receiptText = receipt === undefined ? undefined : receiptCommandText(receipt.text);
+    const text =
+      sourceCommand?.mode === reference.mode &&
+      !slackCommandContainsSecret(sourceCommand.text) &&
+      slackCommandDigest(sourceCommand.text) === reference.contentDigest
+        ? sourceCommand.text
+        : receiptText !== undefined &&
+            !slackCommandContainsSecret(receiptText) &&
+            slackCommandDigest(receiptText) === reference.contentDigest
+          ? receiptText
+          : undefined;
+    if (text === undefined) {
+      throw new AgentExecutionError(
+        `Checkpointed Slack command ${reference.commandId} is awaiting a valid source or durable receipt`,
+        true,
+        "provider_unavailable",
+      );
+    }
+    const responseContext = responseContextForReference(reference);
+    controls.push(
+      reference.mode === "cancel"
+        ? {
+            kind: "cancel",
+            commandId: reference.commandId,
+            reason: text,
+            ...(responseContext === undefined ? {} : { responseContext }),
+            sourceReference: rawReference,
+          }
+        : {
+            kind: reference.mode,
+            commandId: reference.commandId,
+            text,
+            ...(responseContext === undefined ? {} : { responseContext }),
+            sourceReference: rawReference,
+          },
+    );
+  }
+  return controls;
+}
+
+function responseContextForReference(
+  reference: SlackCommandReference | undefined,
+): AgentResponseContext | undefined {
+  return reference === undefined
+    ? undefined
+    : {
+        actorId: reference.actorId,
+        workspaceId: reference.workspaceId,
+        threadId: reference.threadTs ?? reference.messageTs,
+      };
+}
+
+async function loadSlackTranscriptMessage(
+  slack: SlackApi,
+  surface: SlackTaskSurface,
+  executionId: string,
+  messageTs: SlackTimestamp,
+): Promise<{ messageTs: SlackTimestamp; text: string } | undefined> {
+  try {
+    const messages = await relevantSlackMessages(slack, surface, undefined);
+    const message = messages.find((candidate) => candidate.timestamp === messageTs);
+    if (
+      message?.botId === undefined ||
+      message.metadata?.eventType !== "thor_agent_execution" ||
+      message.metadata.eventPayload.executionId !== executionId ||
+      message.text.length > 18_000
+    ) {
+      return undefined;
+    }
+    return { messageTs, text: message.text };
+  } catch {
+    return undefined;
+  }
+}
+
+async function relevantSlackMessages(
+  slack: SlackApi,
+  surface: SlackTaskSurface,
+  commandThreadTs: SlackTimestamp | undefined,
+): Promise<SlackMessage[]> {
+  const messages: SlackMessage[] = [];
+  let cursor: string | undefined;
+  do {
+    const page =
+      surface.mode === "thread_per_ticket" || commandThreadTs !== undefined
+        ? await slack.replies({
+            channelId: surface.channelId,
+            threadTs:
+              surface.mode === "thread_per_ticket"
+                ? surface.threadTs
+                : (commandThreadTs ?? surface.headerTs),
+            limit: 200,
+            ...(cursor === undefined ? {} : { cursor }),
+          })
+        : await slack.history({
+            channelId: surface.channelId,
+            limit: 200,
+            ...(cursor === undefined ? {} : { cursor }),
+          });
+    messages.push(...page.values);
+    cursor = page.nextCursor;
+  } while (cursor !== undefined && messages.length < 1_000);
+
+  if (surface.mode === "channel_per_ticket" && commandThreadTs !== undefined) {
+    let historyCursor: string | undefined;
+    do {
+      const page = await slack.history({
+        channelId: surface.channelId,
+        limit: 200,
+        ...(historyCursor === undefined ? {} : { cursor: historyCursor }),
+      });
+      messages.push(...page.values);
+      historyCursor = page.nextCursor;
+    } while (historyCursor !== undefined && messages.length < 1_000);
+  }
+  return messages;
+}
+
+function receiptCommandText(text: string): string | undefined {
+  const match = /```\n([\s\S]*?)\n```/.exec(text);
+  return match?.[1]?.trim();
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function requireSlack(
+  dependencies: TicketActivityDependencies,
+): NonNullable<TicketActivityDependencies["slack"]> {
+  if (dependencies.slack === undefined) {
+    throw ApplicationFailure.nonRetryable(
+      "Slack collaboration is enabled but the worker has no Slack runtime",
+      "slack_not_configured",
+    );
+  }
+  return dependencies.slack;
+}
+
+function agentLabel(
+  purpose:
+    | { kind: "blueprint" }
+    | { kind: "implementation" }
+    | { kind: "review"; reviewer: ReviewActivityInput["reviewer"] }
+    | { kind: "synthesis" }
+    | { kind: "repair" },
+  harness: string,
+  executionId: string,
+): string {
+  const phase = purpose.kind === "review" ? `Review: ${purpose.reviewer}` : purpose.kind;
+  return `${phase} · ${harness} · ${executionId}`;
 }
 
 function jsonSchema(schema: z.ZodType): Record<string, unknown> {
@@ -515,6 +1115,7 @@ function auditRecord(
   purpose: string,
   executionPackage: ExecutionPackage,
   input: AgentActivityContext,
+  slackDelivery?: "delivered" | "degraded",
 ): ExecutionAuditRecord {
   return {
     executionId: result.executionId,
@@ -530,6 +1131,7 @@ function auditRecord(
     configurationDigest: executionPackage.configurationDigest,
     skills: executionPackage.skills.map(({ name, version, digest }) => ({ name, version, digest })),
     ...(result.sessionId === undefined ? {} : { sessionId: result.sessionId }),
+    ...(slackDelivery === undefined ? {} : { slackDelivery }),
     usage: result.usage,
   };
 }
@@ -604,6 +1206,23 @@ function blueprintComment(input: PublishBlueprintInput): string {
   ].join("\n");
 }
 
+function slackLinkComment(
+  input: PublishTicketSlackLinkInput | UpdateTicketSlackSurfaceInput,
+): string {
+  const pullRequest =
+    input.pullRequestNumber === undefined
+      ? undefined
+      : `https://github.com/${input.ticket.repository.owner}/${input.ticket.repository.name}/pull/${input.pullRequestNumber.toString()}`;
+  return [
+    "## Thor execution",
+    "",
+    `Slack: ${input.surface.permalink}`,
+    `Temporal Workflow: \`${input.workflowId}\``,
+    `Latest result: \`${input.status}\``,
+    ...(pullRequest === undefined ? [] : [`Pull request: ${pullRequest}`]),
+  ].join("\n");
+}
+
 function runSummary(input: RunSummaryInput): string {
   const lines = [
     `Thor workflow \`${input.run.workflowId}\` completed with status \`${input.run.status}\`.`,
@@ -661,6 +1280,14 @@ export function toApplicationFailure(error: unknown): Error {
     return ApplicationFailure.create({
       message: redactKnownSecrets(error.message),
       type: `github_${error.code}`,
+      nonRetryable: !error.retryable,
+      ...(error.retryAfterMs === undefined ? {} : { nextRetryDelay: error.retryAfterMs }),
+    });
+  }
+  if (error instanceof SlackApiError) {
+    return ApplicationFailure.create({
+      message: redactKnownSecrets(error.message),
+      type: `slack_${error.code}`,
       nonRetryable: !error.retryable,
       ...(error.retryAfterMs === undefined ? {} : { nextRetryDelay: error.retryAfterMs }),
     });

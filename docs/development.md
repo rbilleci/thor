@@ -20,6 +20,8 @@ not admit APIs unavailable in production.
   Claude and Codex SDK adapters.
 - `@thor/github` owns GitHub GraphQL/REST mapping, conditional mutations, idempotent side effects,
   and reserved webhook-validation helpers for the deferred webhook roadmap item.
+- `@thor/slack` owns Slack Web API mapping, task-surface provisioning, transcript rendering,
+  short-lived live-control credentials, command parsing, and fakes.
 - `@thor/workflows` owns deterministic Temporal Workflow code and Activity implementations. Only
   Activities import filesystem, Git, GitHub, or agent SDK behavior.
 - `@thor/runtime` validates environment configuration and creates concrete Temporal and GitHub
@@ -27,7 +29,8 @@ not admit APIs unavailable in production.
 
 Applications are composition roots: the worker wires real delivery adapters, the synchronizer hosts
 the per-Project polling Workflow's scan/dispatch Activities and ensures that Workflow is running,
-and the CLI exposes operator controls.
+the Slack gateway verifies signed ingress and fans out live control, and the CLI exposes operator
+controls.
 
 ## Dependency rationale
 
@@ -68,6 +71,14 @@ synchronizer eligibility for detailed and compact boards, deterministic transiti
 retry, cancellation, human gates, repair/re-review, and replay for both delivery profiles. The
 integration suite runs both profiles through real Temporal Activities against an isolated local Git
 repository while using SDK-shaped fake harnesses and a fake GitHub gateway.
+
+Slack tests use the in-memory Slack API and signed HTTP requests. They cover both task-surface
+modes, idempotent provisioning, authorization and command receipts, normalized Claude and Codex
+streams, queue/redirect/cancel semantics, transcript coalescing and rate-limit recovery, router
+mapping and deduplication, direct acknowledgement, and the durable phase-restart fallback. They
+require no Slack workspace or provider credentials. The integration suite additionally carries a
+signed event through the production HTTP gateway, a real local Temporal router Workflow, and the
+Slack receipt Activity for both task-surface modes.
 
 ## Adding or changing a delivery profile
 

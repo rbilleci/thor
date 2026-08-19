@@ -11,6 +11,7 @@
     { "path": "../domain" },
     { "path": "../config" },
     { "path": "../agent" },
-    { "path": "../github" }
+    { "path": "../github" },
+    { "path": "../slack" }
   ]
 }

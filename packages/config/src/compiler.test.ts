@@ -49,6 +49,89 @@ describe("Delivery Project configuration compiler", () => {
       completion: "issue_closed_and_project_done",
       closeIssueAfterMerge: true,
     });
+    expect(first.delivery.collaboration.slack).toEqual({ enabled: false });
+  });
+
+  it("compiles both Slack messaging modes with stable defaults", async () => {
+    const declaration = await loadDeliveryProjectDeclaration(
+      path.join(templates, "compact-delivery.json"),
+    );
+    const threadMode = {
+      ...declaration,
+      collaboration: {
+        slack: {
+          enabled: true,
+          workspaceId: "T012345",
+          messaging: { mode: "thread_per_ticket", projectChannelId: "C012345" },
+          steering: { allowedUserGroupIds: ["S012345"] },
+        },
+      },
+    };
+    const channelMode = {
+      ...declaration,
+      collaboration: {
+        slack: {
+          enabled: true,
+          workspaceId: "T012345",
+          messaging: {
+            mode: "channel_per_ticket",
+            projectIndexChannelId: "C045678",
+            ticketChannels: {
+              namePrefix: "thor-compact",
+              memberUserGroupIds: ["S012345"],
+            },
+          },
+          steering: { allowedUserGroupIds: ["S012345"], defaultMode: "queue" },
+        },
+      },
+    };
+
+    expect(
+      compileProjectBinding(threadMode, discoveredFrom(declaration)).delivery.collaboration,
+    ).toMatchObject({
+      slack: {
+        enabled: true,
+        messaging: { mode: "thread_per_ticket", projectChannelId: "C012345" },
+        eventReconciliationIntervalSeconds: 30,
+        streamFlushIntervalMilliseconds: 1000,
+        controlDeliveryTimeoutSeconds: 5,
+        steering: { defaultMode: "redirect" },
+      },
+    });
+    expect(
+      compileProjectBinding(channelMode, discoveredFrom(declaration)).delivery.collaboration,
+    ).toMatchObject({
+      slack: {
+        enabled: true,
+        messaging: {
+          mode: "channel_per_ticket",
+          ticketChannels: { isPrivate: true, archiveDelayDays: 7 },
+        },
+        steering: { defaultMode: "queue" },
+      },
+    });
+  });
+
+  it("rejects incomplete Slack channel-per-ticket declarations", async () => {
+    const declaration = await loadDeliveryProjectDeclaration(
+      path.join(templates, "compact-delivery.json"),
+    );
+    const invalid = {
+      ...declaration,
+      collaboration: {
+        slack: {
+          enabled: true,
+          workspaceId: "T012345",
+          messaging: {
+            mode: "channel_per_ticket",
+            ticketChannels: { namePrefix: "Thor Invalid", memberUserGroupIds: [] },
+          },
+          steering: { allowedUserGroupIds: ["S012345"] },
+        },
+      },
+    };
+
+    expect(() => compileProjectBinding(invalid, discoveredFrom(declaration))).toThrow();
   });
 
   it("supports renamed fields, compact board projection, explicit defaults, and swapped agents", async () => {

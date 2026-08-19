@@ -250,6 +250,68 @@ export const projectRepositorySchema = repositoryRefSchema.extend({
 });
 export type ProjectRepository = z.infer<typeof projectRepositorySchema>;
 
+const slackWorkspaceIdSchema = z
+  .string()
+  .trim()
+  .regex(/^T[A-Z0-9]+$/, "invalid Slack workspace ID");
+const slackChannelIdSchema = z
+  .string()
+  .trim()
+  .regex(/^[CG][A-Z0-9]+$/, "invalid Slack channel ID");
+const slackUserGroupIdSchema = z
+  .string()
+  .trim()
+  .regex(/^S[A-Z0-9]+$/, "invalid Slack user-group ID");
+
+export const slackMessagingSchema = z.discriminatedUnion("mode", [
+  z.strictObject({
+    mode: z.literal("thread_per_ticket"),
+    projectChannelId: slackChannelIdSchema,
+  }),
+  z.strictObject({
+    mode: z.literal("channel_per_ticket"),
+    projectIndexChannelId: slackChannelIdSchema.optional(),
+    ticketChannels: z.strictObject({
+      namePrefix: z
+        .string()
+        .trim()
+        .min(1)
+        .max(48)
+        .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, "invalid Slack channel-name prefix"),
+      isPrivate: z.boolean().default(true),
+      memberUserGroupIds: z.array(slackUserGroupIdSchema).min(1),
+      archiveDelayDays: z.number().int().min(0).max(3650).default(7),
+    }),
+  }),
+]);
+export type SlackMessaging = z.infer<typeof slackMessagingSchema>;
+
+const enabledSlackCollaborationSchema = z.strictObject({
+  enabled: z.literal(true),
+  workspaceId: slackWorkspaceIdSchema,
+  messaging: slackMessagingSchema,
+  eventReconciliationIntervalSeconds: z.number().int().min(5).max(3600).default(30),
+  streamFlushIntervalMilliseconds: z.number().int().min(100).max(5000).default(1000),
+  controlDeliveryTimeoutSeconds: z.number().int().min(1).max(60).default(5),
+  steering: z.strictObject({
+    allowedUserGroupIds: z.array(slackUserGroupIdSchema).min(1),
+    defaultMode: z.enum(["queue", "redirect"]).default("redirect"),
+  }),
+});
+
+export const slackCollaborationSchema = z.discriminatedUnion("enabled", [
+  z.strictObject({ enabled: z.literal(false) }),
+  enabledSlackCollaborationSchema,
+]);
+export type SlackCollaboration = z.infer<typeof slackCollaborationSchema>;
+
+export const collaborationSchema = z
+  .strictObject({
+    slack: slackCollaborationSchema.default({ enabled: false }),
+  })
+  .default({ slack: { enabled: false } });
+export type Collaboration = z.infer<typeof collaborationSchema>;
+
 export const deliveryProjectDeclarationSchema = z.strictObject({
   apiVersion: z.literal("thor.dev/v1alpha1"),
   kind: z.literal("DeliveryProject"),
@@ -272,6 +334,7 @@ export const deliveryProjectDeclarationSchema = z.strictObject({
   workflow: workflowProfileSchema,
   agents: z.record(profileIdSchema, agentProfileDeclarationSchema),
   skillSelectors: z.array(skillSelectorSchema).default([]),
+  collaboration: collaborationSchema,
 });
 export type DeliveryProjectDeclaration = z.infer<typeof deliveryProjectDeclarationSchema>;
 
@@ -361,6 +424,7 @@ export const runtimeDeliveryProfileSchema = z.strictObject({
   workflow: workflowProfileSchema,
   agents: z.record(profileIdSchema, agentProfileSnapshotSchema),
   skillSelectors: z.array(skillSelectorSchema),
+  collaboration: collaborationSchema,
 });
 export type RuntimeDeliveryProfile = z.infer<typeof runtimeDeliveryProfileSchema>;
 

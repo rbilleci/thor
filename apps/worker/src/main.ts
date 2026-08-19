@@ -1,9 +1,11 @@
 import { fileURLToPath } from "node:url";
 
+import { Client } from "@temporalio/client";
 import { Worker } from "@temporalio/worker";
 import { ClaudeHarness, CodexHarness, ExecutionPackageBuilder, HarnessRouter } from "@thor/agent";
 import {
   createGitHubGateway,
+  createClientConnection,
   createWorkerConnection,
   isRetryableGitHubFailure,
   loadRuntimeConfiguration,
@@ -11,7 +13,15 @@ import {
   mapDeferredProjectFields,
   retryInfrastructureOperation,
 } from "@thor/runtime";
-import { createTicketActivities, GitWorkspaceManager } from "@thor/workflows";
+import { SlackSurfaceManager, SlackWebApiClient, slackUserIdSchema } from "@thor/slack";
+import {
+  createSlackRouterActivities,
+  createTicketActivities,
+  FileExecutionCheckpointStore,
+  GitWorkspaceManager,
+} from "@thor/workflows";
+
+import { TemporalSlackWorkflowRegistrationGateway } from "./slack-workflows.js";
 
 const workflowsPath = fileURLToPath(
   new URL("../../../packages/workflows/src/workflows.ts", import.meta.url),
@@ -34,7 +44,17 @@ async function main(): Promise<void> {
   const harnesses = new HarnessRouter();
   harnesses.register(new ClaudeHarness());
   harnesses.register(new CodexHarness());
-  const activities = createTicketActivities({
+  const clientConnection =
+    configuration.slack === undefined ? undefined : await createClientConnection(configuration);
+  const temporalClient =
+    clientConnection === undefined
+      ? undefined
+      : new Client({ connection: clientConnection, namespace: configuration.temporal.namespace });
+  const slackApi =
+    configuration.slack === undefined
+      ? undefined
+      : new SlackWebApiClient(configuration.slack.botToken);
+  const ticketActivities = createTicketActivities({
     github,
     harnesses,
     packageBuilder: new ExecutionPackageBuilder(configuration.paths.resourceRoot),
@@ -42,9 +62,43 @@ async function main(): Promise<void> {
       sourceRoot: configuration.paths.sourceRoot,
       worktreeRoot: configuration.paths.worktreeRoot,
     }),
+    checkpoints: new FileExecutionCheckpointStore(configuration.paths.executionRoot),
+    ...(configuration.slack === undefined || slackApi === undefined || temporalClient === undefined
+      ? {}
+      : {
+          slack: {
+            api: slackApi,
+            botUserId: configuration.slack.botUserId,
+            surfaces: new SlackSurfaceManager(slackApi, {
+              botUserId: slackUserIdSchema.parse(configuration.slack.botUserId),
+            }),
+            workflows: new TemporalSlackWorkflowRegistrationGateway(
+              temporalClient,
+              configuration.temporal.taskQueue,
+            ),
+            ...(configuration.slack.gatewayUrl === undefined ||
+            configuration.slack.controlToken === undefined
+              ? {}
+              : {
+                  control: {
+                    gatewayUrl: configuration.slack.gatewayUrl,
+                    serviceToken: configuration.slack.controlToken,
+                  },
+                }),
+          },
+        }),
     deferredProjectFields: (finding, ticket) =>
       mapDeferredProjectFields(configuration.binding, finding, ticket),
   });
+  const activities = {
+    ...ticketActivities,
+    ...(configuration.slack === undefined || slackApi === undefined
+      ? {}
+      : createSlackRouterActivities({
+          slack: slackApi,
+          botUserId: slackUserIdSchema.parse(configuration.slack.botUserId),
+        })),
+  };
   const connection = await createWorkerConnection(configuration);
   try {
     const worker = await Worker.create({
@@ -62,6 +116,7 @@ async function main(): Promise<void> {
     await worker.run();
   } finally {
     await connection.close();
+    await clientConnection?.close();
   }
 }
 

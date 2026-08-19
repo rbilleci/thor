@@ -13,6 +13,8 @@ import {
   HarnessRouter,
   type AgentExecutionRequest,
   type AgentExecutionResult,
+  type AgentControl,
+  type AgentEventSink,
   type AgentHarness,
 } from "@thor/agent";
 import { compileRuntimeDeliveryProfile } from "@thor/config";
@@ -168,9 +170,17 @@ class EditingHarness implements AgentHarness {
 
   public async execute(
     request: AgentExecutionRequest,
+    events: AgentEventSink,
+    controls: AsyncIterable<AgentControl>,
     signal: AbortSignal,
   ): Promise<AgentExecutionResult> {
+    void controls;
     if (signal.aborted) throw signal.reason;
+    await events.publish({
+      kind: "session_started",
+      providerSessionId: `${this.kind}-${request.package.executionId}`,
+    });
+    await events.publish({ kind: "turn_started", turn: 1 });
     const purpose = request.package.purpose;
     let structuredOutput: unknown;
     switch (purpose.kind) {
@@ -216,6 +226,7 @@ class EditingHarness implements AgentHarness {
       case "repair":
         throw new Error("repair is not expected in this integration path");
     }
+    await events.publish({ kind: "turn_completed", turn: 1 });
     return {
       executionId: request.package.executionId,
       harness: this.kind,

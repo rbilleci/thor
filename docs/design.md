@@ -10,6 +10,9 @@ This specification defines an autonomous software-development orchestration syst
   artifacts.
 - **GitHub Projects** as the human-facing system of record for tickets, planning state,
   dependencies, prioritization, and workflow status.
+- **Slack task surfaces** as the live agent transcript and authorized steering surface, using either
+  a shared project channel with one thread per ticket or one dedicated channel per ticket, without
+  becoming a competing ticket-state authority.
 - **AI agent workers** as the execution layer for planning, implementation, repair, review, and
   selected maintenance tasks.
 
@@ -251,6 +254,45 @@ implementation identifier, and an explicit migration strategy. A running Workflo
 declaration and profile versions and digest in its start input. Later Git changes apply to new
 Workflows by default; changing an active execution requires an explicit versioned migration or
 Update policy.
+
+## 3.5 Slack Agent Session Plane
+
+Every Slack-enabled delivery Project declares one stable Slack workspace and exactly one messaging
+mode:
+
+- `thread_per_ticket`: Thor creates or finds one bot-owned task root per GitHub Project item in a
+  declared shared project channel; or
+- `channel_per_ticket`: Thor creates or finds one dedicated public or private channel plus a
+  bot-owned header per Project item. A project index channel is optional.
+
+The selected mode is pinned for the lifetime of each `TicketWorkflow`; a declaration change applies
+to new tickets unless an explicit surface migration is performed. In both modes, Thor places the
+GitHub issue link in the root or header and upserts its Slack permalink into a stable GitHub issue
+comment. Slack display names and channel names are not identities, and Slack credentials never enter
+declarations or Workflow payloads.
+
+Agent Activities stream provider-neutral Claude and Codex events into the task surface with
+seconds-level latency. Explicit, authorized Slack commands may queue guidance, redirect an active
+turn, or cancel work. Ordinary discussion is not model input. Guidance may refine execution inside
+the current ticket; material intent, scope, acceptance, dependency, permission, or policy changes
+must be made in GitHub and follow the existing intervention policy.
+
+Slack command delivery has a low-latency live path to the running Activity and a durable Temporal
+Signal path for deduplication and recovery. One `SlackWorkspaceRouterWorkflow` per configured Slack
+workspace owns the mode-aware mapping from shared-channel thread or dedicated-channel identity to
+delivery Project and ticket Workflow. Workspace scope lets the stateless gateway derive a durable
+Signal target directly from every signed Slack event, including events from dynamically created
+ticket channels, without a database or a Slack lookup in the acknowledgement path. The router
+periodically reconciles active surfaces to recover a missed Slack event. The ingress and
+live-control gateway contains no business workflow policy or durable application database.
+
+Slack holds the human-readable operational transcript. Temporal holds orchestration state, command
+references, retries, and checkpoints; GitHub remains authoritative for ticket and software-delivery
+state. Slack unavailability degrades live collaboration but must not discard repository work, bypass
+a gate, or change merge eligibility. Dedicated ticket channels use deterministic names, idempotent
+find-or-create and repair behavior, explicit membership policy, delayed archival, and unarchival on
+ticket reopening. The detailed component, provider, latency, steering, and failure design is in
+[slack-agent-sessions.md](slack-agent-sessions.md).
 
 ---
 
@@ -706,10 +748,11 @@ timestamp cursor could miss a human change made in the same second as Thor's pre
 Workflows deterministically ignore stale or identical snapshots. A Workflow awaits each scan before
 scheduling the next cycle, so polls cannot overlap even across synchronizer process restarts.
 
-Webhook ingestion is deliberately deferred until the end of the delivery roadmap. Its deployment
-model and buffering architecture will be decided separately. A future webhook adapter may reuse the
-same Project-state re-read and Temporal dispatch boundary, but webhook ingress is not an initial
-runtime requirement.
+GitHub webhook ingestion is deliberately deferred until the end of the delivery roadmap. Its
+deployment model and buffering architecture will be decided separately. A future GitHub webhook
+adapter may reuse the same Project-state re-read and Temporal dispatch boundary. The separately
+specified Slack Events ingress handles live transcript steering only and does not replace complete
+GitHub Project reconciliation.
 
 Its responsibility is limited to:
 
@@ -1331,9 +1374,9 @@ has no human-facing board projection.
 
 ---
 
-## 21. Observability and Auditability
+## 21. Observability, Live Progress, and Auditability
 
-The system should provide traceability across GitHub and Temporal.
+The system should provide traceability across GitHub, Temporal, and Slack.
 
 Recommended correlation identifiers:
 
@@ -1345,12 +1388,18 @@ Recommended correlation identifiers:
 - finding IDs;
 - repair pass number;
 - deferred issue IDs.
+- Slack workspace, channel, thread, message, and command IDs.
 
 A human inspecting a GitHub ticket should be able to identify the associated Temporal Workflow. A
-Temporal operator should be able to identify the corresponding GitHub issue and pull request.
+Temporal operator should be able to identify the corresponding GitHub issue, pull request, and Slack
+task surface. The Slack thread root or dedicated-channel header links back to GitHub, and one
+idempotent GitHub issue comment links to its Slack permalink.
 
-Detailed Activity retries and heartbeats remain in Temporal. Human-relevant summaries belong in
-GitHub.
+Detailed Activity retries and heartbeats remain in Temporal. Seconds-level Claude and Codex progress
+plus authorized human steering appear in Slack. Human-relevant durable delivery summaries remain in
+GitHub. Slack is initially an operational transcript rather than a compliance-grade immutable
+archive; transcript export may be added later without putting an unbounded stream in Workflow
+history.
 
 ---
 
@@ -1486,13 +1535,18 @@ The implementation should preserve the following invariants:
     execution and follow the pinned intervention policy; unrelated Project items continue
     reconciling.
 
+12. **Slack is an interaction plane, not a business-state authority.** Agent progress and explicit
+    steering commands may flow through the ticket's configured thread or channel, but GitHub ticket
+    changes and deterministic Temporal policy still decide lifecycle and merge eligibility. Slack
+    failure degrades visibility and steering without corrupting delivery state.
+
 ---
 
 ## 26. External Platform Assumptions and References
 
-This design intentionally depends on public GitHub and Temporal capabilities rather than private
-implementation details. The following platform assumptions were verified when this specification was
-reviewed on 2026-08-16:
+This design intentionally depends on public GitHub, Slack, and Temporal capabilities rather than
+private implementation details. The following platform assumptions were verified when this
+specification was reviewed on 2026-08-17:
 
 - GitHub issues support native blocking dependencies (`blocked by` / `blocking`).
 - GitHub supports native sub-issue hierarchies and Project fields for parent issue and sub-issue
@@ -1501,6 +1555,9 @@ reviewed on 2026-08-16:
   Section 18.
 - Temporal supports Activity Retry Policies, Heartbeats, Workflow Signals/Updates, Task Queues, and
   Child Workflows.
+- Slack supports threaded replies, channel creation and lifecycle management, channel history,
+  application message metadata, AI response streaming and message updates, signed Events API
+  delivery with unique event IDs and retries, and stable message permalinks.
 
 Reference documentation:
 
@@ -1518,6 +1575,9 @@ Reference documentation:
 - Temporal Child Workflows: <https://docs.temporal.io/child-workflows>
 - Temporal terminology and Retry Policies: <https://docs.temporal.io/glossary>
 - Temporal TypeScript SDK: <https://docs.temporal.io/develop/typescript>
+- Slack agent-session design and references: [slack-agent-sessions.md](slack-agent-sessions.md)
+- Slack Events API: <https://docs.slack.dev/apis/events-api/>
+- Slack message streaming: <https://docs.slack.dev/reference/methods/chat.startStream/>
 - Claude Agent SDK: <https://code.claude.com/docs/en/agent-sdk/overview>
 - Codex SDK: <https://learn.chatgpt.com/docs/codex-sdk>
 
@@ -1528,8 +1588,9 @@ specification should remain stable even if provider APIs or UI details evolve.
 
 ## 27. Summary
 
-The system treats GitHub Projects as the planning and human collaboration surface, GitHub
-repositories as the software source of truth, and Temporal as the durable execution engine.
+The system treats GitHub Projects as the planning and business-state surface, GitHub repositories as
+the software source of truth, Temporal as the durable execution engine, and configurable Slack task
+threads or dedicated ticket channels as the live agent transcript and steering surface.
 
 A strong planning model produces a blueprint before work becomes Ready. Implementation agents
 execute against that blueprint. Ten specialized reviewers inspect the result in parallel. A
