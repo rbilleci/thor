@@ -1,0 +1,25 @@
+{
+  "name": "@thor/slack-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "dev": "tsx src/main.ts",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@temporalio/client": "1.22.0",
+    "@thor/agent": "0.1.0",
+    "@thor/config": "0.1.0",
+    "@thor/runtime": "0.1.0",
+    "@thor/slack": "0.1.0",
+    "@thor/workflows": "0.1.0",
+    "zod": "4.4.3"
+  }
+}

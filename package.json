@@ -17,6 +17,7 @@
     "clean": "tsc -b --clean && node scripts/clean.mjs",
     "dev:worker": "node --env-file-if-exists=.env --import tsx apps/worker/src/main.ts",
     "dev:synchronizer": "node --env-file-if-exists=.env --import tsx apps/synchronizer/src/main.ts",
+    "dev:slack-gateway": "node --env-file-if-exists=.env --import tsx apps/slack-gateway/src/main.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint .",

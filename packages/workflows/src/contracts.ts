@@ -3,6 +3,7 @@ import {
   runtimeDeliveryProfileSchema,
   sha256DigestSchema,
   type AgentProfileSnapshot,
+  type RuntimeDeliveryProfile,
   type SkillSelector,
 } from "@thor/config/schema";
 import {
@@ -35,7 +36,10 @@ import type {
   ProjectItemSnapshot,
   StatusTransition,
 } from "@thor/github";
+import type { SlackTaskSurface } from "@thor/slack/types";
 import { z } from "zod";
+
+import type { AcceptedSlackCommand } from "./slack-contracts.js";
 
 export const ticketWorkflowInputSchema = z.strictObject({
   projectItemId: projectItemIdSchema,
@@ -113,6 +117,7 @@ export const executionAuditRecordSchema = z.object({
   ),
   sessionId: z.string().min(1).optional(),
   usage: agentUsageAuditSchema,
+  slackDelivery: z.enum(["delivered", "degraded"]).optional(),
 });
 export type ExecutionAuditRecord = z.infer<typeof executionAuditRecordSchema>;
 
@@ -126,6 +131,41 @@ export type AgentActivityContext = {
   skillSelectors: SkillSelector[];
   declarationDigest: string;
   workflowProfile: string;
+  slackSession?: {
+    workflowId: WorkflowId;
+    surface: SlackTaskSurface;
+    flushIntervalMilliseconds: number;
+    defaultMode: "queue" | "redirect";
+  };
+  recoveryCommands?: AcceptedSlackCommand[];
+};
+
+export type EnsureTicketSlackSurfaceInput = {
+  workflowId: WorkflowId;
+  projectItemId: ProjectItemId;
+  ticket: ProjectItemSnapshot["ticket"];
+  status: string;
+  pullRequestNumber?: number;
+  slack: Extract<RuntimeDeliveryProfile["collaboration"]["slack"], { enabled: true }>;
+};
+
+export type RegisterTicketSlackSurfaceInput = {
+  workflowId: WorkflowId;
+  projectItemId: ProjectItemId;
+  surface: SlackTaskSurface;
+  slack: Extract<RuntimeDeliveryProfile["collaboration"]["slack"], { enabled: true }>;
+};
+
+export type PublishTicketSlackLinkInput = {
+  workflowId: WorkflowId;
+  ticket: ProjectItemSnapshot["ticket"];
+  surface: SlackTaskSurface;
+  status: string;
+  pullRequestNumber?: number;
+};
+
+export type UpdateTicketSlackSurfaceInput = EnsureTicketSlackSurfaceInput & {
+  surface: SlackTaskSurface;
 };
 
 export type BlueprintActivityInput = AgentActivityContext & {
@@ -217,6 +257,8 @@ export type TicketWorkflowState = {
   projectItemAvailability: "present" | "unreadable" | "removed";
   auditTrail: ExecutionAuditRecord[];
   activeExecutionIds: ExecutionId[];
+  slackSurface?: SlackTaskSurface;
+  pendingSlackCommandIds: string[];
 };
 
 export type TicketWorkflowResult = {
@@ -239,6 +281,11 @@ export type TicketActivities = {
   merge(input: MergeActivityInput): Promise<string>;
   closeSourceIssue(input: CloseSourceIssueInput): Promise<void>;
   publishRunSummary(input: RunSummaryInput): Promise<void>;
+  ensureTicketSlackSurface(input: EnsureTicketSlackSurfaceInput): Promise<SlackTaskSurface>;
+  registerTicketSlackSurface(input: RegisterTicketSlackSurfaceInput): Promise<void>;
+  publishTicketSlackLink(input: PublishTicketSlackLinkInput): Promise<void>;
+  updateTicketSlackSurface(input: UpdateTicketSlackSurfaceInput): Promise<void>;
+  closeTicketSlackSurface(input: RegisterTicketSlackSurfaceInput): Promise<void>;
 };
 
 export const activityResultSchemas = {

@@ -5,9 +5,11 @@
     { "path": "packages/config" },
     { "path": "packages/agent" },
     { "path": "packages/github" },
+    { "path": "packages/slack" },
     { "path": "packages/workflows" },
     { "path": "packages/runtime" },
     { "path": "apps/worker" },
+    { "path": "apps/slack-gateway" },
     { "path": "apps/synchronizer" },
     { "path": "apps/cli" },
     { "path": "tests" }

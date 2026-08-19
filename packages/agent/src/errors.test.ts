@@ -28,4 +28,25 @@ describe("provider result normalization", () => {
       retryable: true,
     });
   });
+
+  it("classifies a missing checkpointed session for recovery", () => {
+    expect(
+      normalizeProviderError(
+        new Error("No rollout found for thread ID stale"),
+        new AbortController().signal,
+        { resumingSession: true },
+      ),
+    ).toMatchObject({
+      code: "session_unavailable",
+      retryable: true,
+    });
+  });
+
+  it("does not classify an unavailable session when starting a fresh execution", () => {
+    expect(
+      normalizeProviderError(new Error("Session not found"), new AbortController().signal),
+    ).toMatchObject({
+      code: "provider_failed",
+    });
+  });
 });

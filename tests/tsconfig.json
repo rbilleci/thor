@@ -12,7 +12,9 @@
     { "path": "../packages/config" },
     { "path": "../packages/agent" },
     { "path": "../packages/github" },
+    { "path": "../packages/slack" },
     { "path": "../packages/workflows" },
-    { "path": "../packages/runtime" }
+    { "path": "../packages/runtime" },
+    { "path": "../apps/slack-gateway" }
   ]
 }

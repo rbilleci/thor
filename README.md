@@ -14,6 +14,8 @@ procedures are in [docs/operations.md](docs/operations.md).
 - Deterministic ticket Workflow with explicit retries, durable waits, cancellation, and configurable
   review fan-out (ten reviewers in the detailed default profile).
 - Native Claude Agent SDK and Codex SDK adapters behind one provider-neutral interface.
+- Slack task surfaces in shared-thread or dedicated-channel mode, with seconds-level normalized
+  progress, signed ingress, authorized live steering, and durable Temporal fallback.
 - A unique prompt, `AGENTS.md`, built-in phase skills, and execution configuration for Claude and
   Codex.
 - Ticket- and blueprint-selected custom skills for security, data migration, API compatibility, and
@@ -44,6 +46,7 @@ Git, GitHub, and agent SDK effects execute in Activities.
 - Docker with Compose for the local Temporal server, or a Temporal Cloud namespace.
 - A GitHub token or GitHub App with access to the configured Project and repositories.
 - Claude and/or Codex authentication in the worker environment when running live agents.
+- A Slack app and public HTTPS gateway endpoint when Slack collaboration is enabled.
 
 ## Quick start
 
@@ -165,12 +168,14 @@ record.
 ```text
 apps/worker          Temporal worker and concrete Activity wiring
 apps/synchronizer    Worker for the per-Project polling Workflow and its Activities
+apps/slack-gateway   Signed Slack ingress and stateless live-control fan-out
 apps/cli             Operator commands
 config/templates     Detailed and compact DeliveryProject declarations
 packages/domain      Domain schemas and deterministic state machine
 packages/config      Declaration schemas, compiler, bindings, and Project planner
 packages/agent       Claude/Codex adapters and execution-package builder
 packages/github      GitHub delivery/control-plane gateways, reserved webhook helpers, and fakes
+packages/slack       Slack API, task surfaces, transcripts, controls, and fakes
 packages/workflows   Temporal Workflow, Activities, and Git workspaces
 packages/runtime     Validated runtime configuration and connections
 resources/           Versioned prompts, AGENTS.md files, and skills

@@ -5,11 +5,14 @@ deployment. The lifecycle invariants remain defined by [design.md](design.md).
 
 ## Runtime services
 
-Thor has two long-running processes:
+Thor has two required long-running processes and one process required when Slack collaboration is
+enabled:
 
 - `@thor/worker` polls the configured Temporal Task Queue and executes Workflows and Activities.
 - `@thor/synchronizer` polls GitHub Project changes and sends Temporal Signals. It contains no
   lifecycle policy.
+- `@thor/slack-gateway` verifies Slack signatures, durably submits commands to Temporal, and fans
+  accepted controls out to active Agent Activities over an internal HTTP path.
 
 The CLI is an on-demand Temporal client. The worker and synchronizer may be replicated; Temporal
 coordinates execution, and GitHub mutations use conditional or find-or-create behavior.
@@ -108,6 +111,12 @@ npm run dev:worker
 npm run dev:synchronizer
 ```
 
+When the checked-in declaration enables Slack, also start:
+
+```bash
+npm run dev:slack-gateway
+```
+
 In a built deployment use each workspace package's `start` command. Both processes emit structured
 JSON lifecycle logs. Each process validates the live Project and compiles the same declaration
 before connecting delivery behavior to it; structural drift prevents startup. Correlate operations
@@ -121,6 +130,52 @@ ignore identical and stale snapshots, while material ticket or lifecycle changes
 authoritative. Poll ticks do not overlap within a process; a failed scan is retried in full on the
 next tick. Set `THOR_POLL_INTERVAL_MS` to at least 5000; the default is 30000. The synchronizer
 exposes no inbound HTTP listener.
+
+## Slack setup
+
+Create one Slack app for Thor and enable the Events API plus interactivity. Configure these public
+request URLs on the Slack app:
+
+```text
+https://<public-gateway>/slack/events
+https://<public-gateway>/slack/interactions
+```
+
+Subscribe the bot to `app_mention`. Grant `app_mentions:read`, `chat:write`, `usergroups:read`, and
+the conversation read/history scopes appropriate to the channels in use. Dedicated ticket channels
+also need channel creation, management, invitation, and private-conversation read/history scopes.
+Enable interactivity so the task header's Cancel button can call the configured interactions URL.
+Invite the bot to the shared project and optional index channels. Slack organization policy can
+restrict these capabilities, so verify them in a disposable private channel before production
+rollout.
+
+The worker and gateway share the bot identity and a control secret, but the secret itself is never
+sent as a bearer credential. The worker derives a one-minute HMAC credential bound to its Workflow
+and execution IDs for each internal request. Configure:
+
+```text
+SLACK_BOT_TOKEN=<secret>                   # worker and gateway
+SLACK_BOT_USER_ID=U...                     # worker and gateway
+SLACK_SIGNING_SECRET=<secret>              # gateway only
+THOR_SLACK_CONTROL_TOKEN=<32+ byte secret> # worker and gateway
+THOR_SLACK_GATEWAY_URL=http://slack-gateway:8080 # worker only; private network
+THOR_SLACK_GATEWAY_PORT=8080               # gateway only
+THOR_EXECUTION_ROOT=./.thor-executions     # worker checkpoint volume
+```
+
+Do not expose `/internal/control/*` publicly. The public reverse proxy should route only the two
+signed `/slack/*` endpoints. In a replicated worker deployment, mount `THOR_EXECUTION_ROOT` on an
+access-controlled persistent volume shared by workers that can take over the same Task Queue. This
+directory contains Thor's short-lived execution checkpoints, never application business state. To
+resume a provider session after worker replacement, its SDK-specific local session storage must also
+survive on an access-controlled shared volume. If it does not, Thor detects the unavailable session
+and starts a marked recovery session against the preserved worktree and execution package.
+
+Configure `collaboration.slack` in the checked-in delivery declaration using one of the two examples
+in [slack-agent-sessions.md](slack-agent-sessions.md). `thread_per_ticket` requires a stable project
+channel ID. `channel_per_ticket` requires a deterministic prefix, privacy and membership policy, and
+optionally a project index channel. Restart the worker and gateway after changing the declaration;
+active ticket Workflows retain their pinned mode.
 
 ## Normal human controls
 
@@ -190,8 +245,9 @@ to pass.
   Temporal, use exponential jitter with a five-minute maximum delay.
 - Authentication, invalid structured output, policy conflicts, and invalid execution packages are
   terminal Activity errors.
-- Agent Activities heartbeat every 30 seconds; the worker caps heartbeat throttling at 10 seconds so
-  cancellation propagates promptly.
+- Agent Activities emit a heartbeat at least every five seconds; their heartbeat timeout is 30
+  seconds and the worker caps heartbeat throttling at 10 seconds so cancellation propagates
+  promptly.
 - A worker loss reschedules the Activity. A new worker can recreate the isolated worktree from the
   durable remote branch.
 - GitHub transition conflicts pause the internal run instead of overwriting the human state.
@@ -214,7 +270,8 @@ reset Workflow history merely to bypass a gate.
 7. Confirm logs and Temporal payloads contain no secrets or full prompt content.
 8. Back up or retain Temporal according to the organization's recovery requirements.
 
-The repository integration suite verifies local Temporal and Git behavior with fakes. The separately
-gated `npm run test:live:e2e` suite verifies real GitHub plus a real local Temporal server with
-scripted harnesses. It does not verify paid Claude/Codex calls, GitHub App authentication, or
-Temporal Cloud.
+The repository integration suite verifies local Temporal, Git, and the signed Slack-to-Temporal
+control path with fakes. The separately gated `npm run test:live:e2e` suite verifies real GitHub
+plus a real local Temporal server with scripted harnesses. It does not verify a real Slack
+workspace, paid Claude/Codex calls, GitHub App authentication, or Temporal Cloud; qualify those
+separately in disposable environments before production rollout.

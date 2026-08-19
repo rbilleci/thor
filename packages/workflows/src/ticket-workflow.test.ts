@@ -15,6 +15,8 @@ import {
   type TicketContext,
   type TicketPolicy,
 } from "@thor/domain";
+import { slackCommandDigest } from "@thor/slack";
+import { slackCommandReferenceSchema, slackTaskSurfaceSchema } from "@thor/slack/types";
 import { afterEach, describe, expect, test } from "vitest";
 
 import {
@@ -31,6 +33,8 @@ import type {
   TicketActivities,
   TicketWorkflowInput,
 } from "./contracts.js";
+import { acceptedSlackCommandSchema } from "./slack-contracts.js";
+import { acceptedSlackCommandSignal, appliedSlackCommandSignal } from "./slack-router.js";
 
 const workflowsPath = fileURLToPath(new URL("./workflows.ts", import.meta.url));
 const projectItemId = projectItemIdSchema.parse("PVTI_test_1");
@@ -978,6 +982,189 @@ describe("ticketWorkflow", () => {
       await workerRun;
     }
   }, 60_000);
+
+  test("restarts an agent phase with a durable Slack command after direct delivery times out", async () => {
+    environment = await TestWorkflowEnvironment.createTimeSkipping();
+    const fake = createActivities(policy("autonomous"));
+    const surface = slackTaskSurfaceSchema.parse({
+      mode: "thread_per_ticket",
+      workspaceId: "TWORKSPACE",
+      channelId: "CPROJECT",
+      threadTs: "1700000000.000001",
+      headerTs: "1700000000.000001",
+      permalink: "https://fake.slack.com/root",
+    });
+    if (surface.mode !== "thread_per_ticket") throw new Error("expected thread surface");
+    let attempts = 0;
+    let recoveredCommandIds: string[] = [];
+    const projectedSlackStatuses: string[] = [];
+    fake.activities.ensureTicketSlackSurface = () => Promise.resolve(surface);
+    fake.activities.updateTicketSlackSurface = (input) => {
+      projectedSlackStatuses.push(input.status);
+      return Promise.resolve();
+    };
+    fake.activities.createBlueprint = async (input) => {
+      attempts += 1;
+      if (attempts === 1) {
+        const context = Context.current();
+        const heartbeat = setInterval(() => context.heartbeat(), 10);
+        try {
+          return await context.cancelled;
+        } finally {
+          clearInterval(heartbeat);
+        }
+      }
+      recoveredCommandIds =
+        input.recoveryCommands?.map((command) => command.reference.commandId) ?? [];
+      return audited(input, "blueprint", {
+        objective: "Implement durable delivery",
+        constraints: [],
+        architecture: "Use deterministic workflow orchestration",
+        proposedDesign: "Execute all delivery phases through Activities",
+        affectedAreas: ["orchestration"],
+        implementationPlan: ["Implement the change"],
+        testingPlan: ["Run the tests"],
+        rolloutPlan: [],
+        risks: [],
+        unresolvedBlockingQuestions: [],
+        acceptanceCriteria: ["The workflow completes"],
+      });
+    };
+    const delivery = {
+      ...defaultDelivery,
+      collaboration: {
+        slack: {
+          enabled: true as const,
+          workspaceId: "TWORKSPACE",
+          messaging: {
+            mode: "thread_per_ticket" as const,
+            projectChannelId: "CPROJECT",
+          },
+          eventReconciliationIntervalSeconds: 30,
+          streamFlushIntervalMilliseconds: 1_000,
+          controlDeliveryTimeoutSeconds: 5,
+          steering: {
+            allowedUserGroupIds: ["SENGINEERS"],
+            defaultMode: "redirect" as const,
+          },
+        },
+      },
+    };
+    const taskQueue = "thor-slack-fallback";
+    const worker = await Worker.create({
+      connection: environment.nativeConnection,
+      taskQueue,
+      workflowsPath,
+      activities: fake.activities,
+      maxHeartbeatThrottleInterval: "10ms",
+    });
+    const handle = await environment.client.workflow.start(ticketWorkflow, {
+      workflowId: `github-project-item:${projectItemId}:slack-fallback`,
+      taskQueue,
+      args: [workflowInput(delivery)],
+    });
+    const workerRun = worker.run();
+    try {
+      await waitForActiveExecution(() => handle.query(ticketStateQuery));
+      const reference = slackCommandReferenceSchema.parse({
+        commandId: "command-fallback",
+        eventId: "Ev-fallback",
+        workspaceId: "TWORKSPACE",
+        channelId: "CPROJECT",
+        threadTs: surface.threadTs,
+        messageTs: "1700000000.100001",
+        actorId: "UACTOR",
+        mode: "redirect",
+        contentDigest: slackCommandDigest("inspect helper"),
+      });
+      await handle.signal(
+        acceptedSlackCommandSignal,
+        acceptedSlackCommandSchema.parse({
+          reference,
+          receiptTs: "1700000000.100002",
+        }),
+      );
+      const result = await handle.result();
+
+      expect(result.run.status).toBe("done");
+      expect(attempts).toBe(2);
+      expect(recoveredCommandIds).toEqual(["command-fallback"]);
+      expect(projectedSlackStatuses).toContain("in_progress");
+      expect(projectedSlackStatuses.at(-1)).toBe("done");
+    } finally {
+      worker.shutdown();
+      await workerRun;
+    }
+  }, 60_000);
+
+  test("keeps an agent phase running when direct Slack delivery is acknowledged", async () => {
+    environment = await TestWorkflowEnvironment.createTimeSkipping();
+    const fake = createActivities(policy("autonomous"));
+    const surface = slackTaskSurfaceSchema.parse({
+      mode: "channel_per_ticket",
+      workspaceId: "TWORKSPACE",
+      channelId: "CTICKET",
+      headerTs: "1700000000.000001",
+      permalink: "https://fake.slack.com/ticket",
+    });
+    let attempts = 0;
+    let releaseFirst = (): void => undefined;
+    const released = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const originalBlueprint = fake.activities.createBlueprint.bind(fake.activities);
+    fake.activities.ensureTicketSlackSurface = () => Promise.resolve(surface);
+    fake.activities.createBlueprint = async (input) => {
+      attempts += 1;
+      await released;
+      return originalBlueprint(input);
+    };
+    const delivery = slackEnabledDelivery();
+    const taskQueue = "thor-slack-direct-ack";
+    const worker = await Worker.create({
+      connection: environment.nativeConnection,
+      taskQueue,
+      workflowsPath,
+      activities: fake.activities,
+    });
+    const handle = await environment.client.workflow.start(ticketWorkflow, {
+      workflowId: `github-project-item:${projectItemId}:slack-direct-ack`,
+      taskQueue,
+      args: [workflowInput(delivery)],
+    });
+    const workerRun = worker.run();
+    try {
+      await waitForActiveExecution(() => handle.query(ticketStateQuery));
+      const accepted = acceptedSlackCommandSchema.parse({
+        reference: {
+          commandId: "command-direct",
+          eventId: "Ev-direct",
+          workspaceId: "TWORKSPACE",
+          channelId: "CTICKET",
+          messageTs: "1700000000.200001",
+          actorId: "UACTOR",
+          mode: "queue",
+          contentDigest: slackCommandDigest("run tests"),
+        },
+        receiptTs: "1700000000.200002",
+      });
+      await handle.signal(acceptedSlackCommandSignal, accepted);
+      const [executionId] = (await handle.query(ticketStateQuery)).activeExecutionIds;
+      if (executionId === undefined) throw new Error("missing active execution");
+      await handle.signal(appliedSlackCommandSignal, {
+        commandId: accepted.reference.commandId,
+        executionId,
+      });
+      releaseFirst();
+      const result = await handle.result();
+
+      expect(result.run.status).toBe("done");
+      expect(attempts).toBe(1);
+    } finally {
+      worker.shutdown();
+      await workerRun;
+    }
+  }, 60_000);
 });
 
 function createActivities(
@@ -1023,6 +1210,11 @@ function createActivities(
     ticket,
   });
   const activities: TicketActivities = {
+    ensureTicketSlackSurface: () => Promise.reject(new Error("Slack is disabled in this test")),
+    registerTicketSlackSurface: () => Promise.resolve(),
+    publishTicketSlackLink: () => Promise.resolve(),
+    updateTicketSlackSurface: () => Promise.resolve(),
+    closeTicketSlackSurface: () => Promise.resolve(),
     loadProjectItem: () => Promise.resolve(snapshot()),
     transitionProjectStatus: (transition) => {
       status = transition.targetStatus;
@@ -1161,6 +1353,34 @@ function policy(approvalPolicy: TicketPolicy["approvalPolicy"]): TicketPolicy {
 
 function workflowInput(delivery = defaultDelivery): TicketWorkflowInput {
   return { projectItemId, baseBranch: "main", delivery };
+}
+
+function slackEnabledDelivery(): typeof defaultDelivery {
+  return {
+    ...defaultDelivery,
+    collaboration: {
+      slack: {
+        enabled: true,
+        workspaceId: "TWORKSPACE",
+        messaging: {
+          mode: "channel_per_ticket",
+          ticketChannels: {
+            namePrefix: "thor-project",
+            isPrivate: true,
+            memberUserGroupIds: ["SENGINEERS"],
+            archiveDelayDays: 7,
+          },
+        },
+        eventReconciliationIntervalSeconds: 30,
+        streamFlushIntervalMilliseconds: 1_000,
+        controlDeliveryTimeoutSeconds: 5,
+        steering: {
+          allowedUserGroupIds: ["SENGINEERS"],
+          defaultMode: "redirect",
+        },
+      },
+    },
+  };
 }
 
 async function waitForStatus(

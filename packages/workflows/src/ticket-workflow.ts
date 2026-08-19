@@ -45,6 +45,7 @@ import {
   type TicketStatus,
 } from "@thor/domain";
 import type { ProjectItemSnapshot } from "@thor/github";
+import type { SlackTaskSurface } from "@thor/slack/types";
 
 import {
   approvalDecisionEventSchema,
@@ -52,6 +53,7 @@ import {
   projectChangeEventSchema,
   ticketWorkflowInputSchema,
   type ApprovalDecisionEvent,
+  type AgentActivityContext,
   type ExecutionAuditRecord,
   type OperatorEvent,
   type ProjectChangeEvent,
@@ -60,6 +62,12 @@ import {
   type TicketWorkflowResult,
   type TicketWorkflowState,
 } from "./contracts.js";
+import {
+  acceptedSlackCommandSchema,
+  appliedSlackCommandSchema,
+  type AcceptedSlackCommand,
+} from "./slack-contracts.js";
+import { acceptedSlackCommandSignal, appliedSlackCommandSignal } from "./slack-router.js";
 
 const githubActivities = proxyActivities<
   Pick<
@@ -92,7 +100,7 @@ const agentActivities = proxyActivities<
   Pick<TicketActivities, "createBlueprint" | "implement" | "review" | "synthesize" | "repair">
 >({
   startToCloseTimeout: "4 hours",
-  heartbeatTimeout: "2 minutes",
+  heartbeatTimeout: "30 seconds",
   cancellationType: "WAIT_CANCELLATION_COMPLETED",
   retry: {
     initialInterval: "10 seconds",
@@ -110,6 +118,32 @@ const agentActivities = proxyActivities<
   },
 });
 
+const slackActivities = proxyActivities<
+  Pick<
+    TicketActivities,
+    | "ensureTicketSlackSurface"
+    | "registerTicketSlackSurface"
+    | "publishTicketSlackLink"
+    | "updateTicketSlackSurface"
+    | "closeTicketSlackSurface"
+  >
+>({
+  startToCloseTimeout: "2 minutes",
+  retry: {
+    initialInterval: "1 second",
+    backoffCoefficient: 2,
+    maximumInterval: "10 seconds",
+    maximumAttempts: 4,
+    nonRetryableErrorTypes: ["slack_not_configured", "slack_conflict"],
+  },
+});
+
+type AgentActivityOutcome<Value> =
+  | { kind: "result"; value: { value: Value; audit: ExecutionAuditRecord } }
+  | { kind: "failure"; error: unknown };
+type AgentCommandWake = { kind: "command" };
+type AgentDeliveryWake = { kind: "delivery"; delivered: boolean };
+
 export const projectChangedSignal = defineSignal<[ProjectChangeEvent]>("projectChanged");
 export const blueprintDecisionSignal = defineSignal<[ApprovalDecisionEvent]>("blueprintDecision");
 export const mergeDecisionSignal = defineSignal<[ApprovalDecisionEvent]>("mergeDecision");
@@ -126,6 +160,9 @@ export async function ticketWorkflow(rawInput: TicketWorkflowInput): Promise<Tic
   const activeExecutionIds = new Set<ExecutionId>();
   const activeScopes = new Set<CancellationScope>();
   const interventionCancelledScopes = new Set<CancellationScope>();
+  let slackSurface: SlackTaskSurface | undefined;
+  const pendingSlackCommands = new Map<string, AcceptedSlackCommand>();
+  const appliedBeforeAcceptance = new Set<string>();
   let executionSequence = 0;
   const queuedProjectChanges: ProjectChangeEvent[] = [];
   const queuedBlueprintDecisions: ApprovalDecisionEvent[] = [];
@@ -138,7 +175,31 @@ export async function ticketWorkflow(rawInput: TicketWorkflowInput): Promise<Tic
     projectItemAvailability,
     auditTrail: [...auditTrail],
     activeExecutionIds: [...activeExecutionIds].sort(),
+    ...(slackSurface === undefined ? {} : { slackSurface }),
+    pendingSlackCommandIds: [...pendingSlackCommands.keys()].sort(),
   }));
+  setHandler(acceptedSlackCommandSignal, (command) => {
+    const parsed = acceptedSlackCommandSchema.parse(command);
+    if (queryState.run !== undefined && runIsTerminal(queryState.run)) return;
+    if (appliedBeforeAcceptance.delete(parsed.reference.commandId)) return;
+    pendingSlackCommands.set(parsed.reference.commandId, parsed);
+    if (parsed.reference.mode === "cancel") {
+      if (queryState.run !== undefined) {
+        applyHumanStatus(
+          queryState.run,
+          "cancelled",
+          `cancelled by Slack command ${parsed.reference.commandId}`,
+        );
+      }
+      cancelActiveExecutions();
+    }
+  });
+  setHandler(appliedSlackCommandSignal, (acknowledgement) => {
+    const parsed = appliedSlackCommandSchema.parse(acknowledgement);
+    if (!pendingSlackCommands.delete(parsed.commandId)) {
+      appliedBeforeAcceptance.add(parsed.commandId);
+    }
+  });
   setHandler(projectChangedSignal, (event) => {
     const parsed = projectChangeEventSchema.parse(event);
     if (queryState.run !== undefined && runIsTerminal(queryState.run)) return;
@@ -230,6 +291,38 @@ export async function ticketWorkflow(rawInput: TicketWorkflowInput): Promise<Tic
     delivery.workflow.interventions,
   );
   applyQueuedEvents();
+  const slackConfiguration = delivery.collaboration.slack;
+  if (slackConfiguration.enabled) {
+    try {
+      slackSurface = await slackActivities.ensureTicketSlackSurface({
+        workflowId: run.workflowId,
+        projectItemId: input.projectItemId,
+        ticket: run.ticket,
+        status: run.status,
+        slack: slackConfiguration,
+      });
+      await slackActivities.registerTicketSlackSurface({
+        workflowId: run.workflowId,
+        projectItemId: input.projectItemId,
+        surface: slackSurface,
+        slack: slackConfiguration,
+      });
+    } catch {
+      slackSurface = undefined;
+    }
+    if (slackSurface !== undefined) {
+      try {
+        await slackActivities.publishTicketSlackLink({
+          workflowId: run.workflowId,
+          ticket: run.ticket,
+          surface: slackSurface,
+          status: run.status,
+        });
+      } catch {
+        // The status projection repairs this stable GitHub link on its next successful update.
+      }
+    }
+  }
   if (!executionShouldStop(run)) {
     if (
       !delivery.workflow.board.entrypoints.implementation.includes(latestProjectSnapshot.status)
@@ -255,10 +348,10 @@ export async function ticketWorkflow(rawInput: TicketWorkflowInput): Promise<Tic
           await synchronizeStatus(run.status);
           break;
         }
-        const result = await runAgentActivity("blueprint", (executionId) =>
+        const result = await runAgentActivity("blueprint", (executionId, recoveryCommands) =>
           agentActivities.createBlueprint({
             executionId,
-            ...agentActivityContext("blueprint"),
+            ...agentActivityContext("blueprint", recoveryCommands),
             ticket: run.ticket,
             baseBranch: input.baseBranch,
             ...(run.blueprint === undefined ? {} : { priorBlueprint: run.blueprint }),
@@ -296,10 +389,10 @@ export async function ticketWorkflow(rawInput: TicketWorkflowInput): Promise<Tic
         await synchronizeStatus("in_progress");
         if (executionShouldStop(run)) break;
         startImplementation(run);
-        const result = await runAgentActivity("implementation", (executionId) =>
+        const result = await runAgentActivity("implementation", (executionId, recoveryCommands) =>
           agentActivities.implement({
             executionId,
-            ...agentActivityContext("implementation"),
+            ...agentActivityContext("implementation", recoveryCommands),
             ticket: run.ticket,
             blueprint,
             baseBranch: input.baseBranch,
@@ -326,16 +419,18 @@ export async function ticketWorkflow(rawInput: TicketWorkflowInput): Promise<Tic
         const reviewRunId = startReview(run);
         const results = await Promise.all(
           action.reviewers.map(async (reviewer) => {
-            const result = await runAgentActivity(`review-${reviewer}`, (executionId) =>
-              agentActivities.review({
-                executionId,
-                ...agentActivityContext("review"),
-                ticket: run.ticket,
-                blueprint,
-                implementation,
-                reviewer,
-                reviewRunId,
-              }),
+            const result = await runAgentActivity(
+              `review-${reviewer}`,
+              (executionId, recoveryCommands) =>
+                agentActivities.review({
+                  executionId,
+                  ...agentActivityContext("review", recoveryCommands),
+                  ticket: run.ticket,
+                  blueprint,
+                  implementation,
+                  reviewer,
+                  reviewRunId,
+                }),
             );
             return result;
           }),
@@ -345,10 +440,10 @@ export async function ticketWorkflow(rawInput: TicketWorkflowInput): Promise<Tic
           (result): result is NonNullable<typeof result> => result !== undefined,
         );
         auditTrail.push(...completedReviews.map((result) => result.audit));
-        const synthesis = await runAgentActivity("synthesis", (executionId) =>
+        const synthesis = await runAgentActivity("synthesis", (executionId, recoveryCommands) =>
           agentActivities.synthesize({
             executionId,
-            ...agentActivityContext("synthesis"),
+            ...agentActivityContext("synthesis", recoveryCommands),
             ticket: run.ticket,
             blueprint,
             implementation,
@@ -375,18 +470,20 @@ export async function ticketWorkflow(rawInput: TicketWorkflowInput): Promise<Tic
         }
         await synchronizeStatus("repairing");
         if (executionShouldStop(run)) break;
-        const result = await runAgentActivity(`repair-${run.repairPass + 1}`, (executionId) =>
-          agentActivities.repair({
-            executionId,
-            ...agentActivityContext("repair"),
-            ticket: run.ticket,
-            blueprint,
-            implementation,
-            synthesis: repairSynthesis,
-            findingIds: action.findingIds,
-            repairPass: run.repairPass + 1,
-            ...(run.externalReason === undefined ? {} : { humanFeedback: run.externalReason }),
-          }),
+        const result = await runAgentActivity(
+          `repair-${run.repairPass + 1}`,
+          (executionId, recoveryCommands) =>
+            agentActivities.repair({
+              executionId,
+              ...agentActivityContext("repair", recoveryCommands),
+              ticket: run.ticket,
+              blueprint,
+              implementation,
+              synthesis: repairSynthesis,
+              findingIds: action.findingIds,
+              repairPass: run.repairPass + 1,
+              ...(run.externalReason === undefined ? {} : { humanFeedback: run.externalReason }),
+            }),
         );
         if (result === undefined || executionShouldStop(run)) break;
         auditTrail.push(result.audit);
@@ -476,6 +573,33 @@ export async function ticketWorkflow(rawInput: TicketWorkflowInput): Promise<Tic
     auditTrail,
     ...(mergeCommitSha === undefined ? {} : { mergeCommitSha }),
   });
+  if (slackConfiguration.enabled && slackSurface !== undefined) {
+    try {
+      await slackActivities.updateTicketSlackSurface({
+        workflowId: run.workflowId,
+        projectItemId: input.projectItemId,
+        ticket: run.ticket,
+        status: run.status,
+        ...(run.implementation === undefined
+          ? {}
+          : { pullRequestNumber: run.implementation.pullRequestNumber }),
+        surface: slackSurface,
+        slack: slackConfiguration,
+      });
+    } catch {
+      // Slack is ancillary; terminal delivery state remains authoritative in GitHub and Temporal.
+    }
+    try {
+      await slackActivities.closeTicketSlackSurface({
+        workflowId: run.workflowId,
+        projectItemId: input.projectItemId,
+        surface: slackSurface,
+        slack: slackConfiguration,
+      });
+    } catch {
+      // A router tombstone is repairable and cannot change the completed delivery result.
+    }
+  }
   return { run, auditTrail, ...(mergeCommitSha === undefined ? {} : { mergeCommitSha }) };
 
   function applyQueuedEvents(): void {
@@ -525,10 +649,14 @@ export async function ticketWorkflow(rawInput: TicketWorkflowInput): Promise<Tic
       projectItemAvailability !== "present" ||
       targetStatus === "orphaned"
     ) {
+      await projectSlackStatus(run.status);
       return;
     }
     const targetBoardState = delivery.workflow.board.states[targetStatus];
-    if (latestProjectSnapshot.status === targetBoardState) return;
+    if (latestProjectSnapshot.status === targetBoardState) {
+      await projectSlackStatus(targetStatus);
+      return;
+    }
     if (
       latestProjectSnapshot.status === delivery.workflow.board.controls.blocked ||
       latestProjectSnapshot.status === delivery.workflow.board.controls.cancelled
@@ -539,6 +667,7 @@ export async function ticketWorkflow(rawInput: TicketWorkflowInput): Promise<Tic
         delivery.workflow.board,
         "authoritative GitHub status",
       );
+      await projectSlackStatus(run.status);
       return;
     }
     const result = await githubActivities.transitionProjectStatus({
@@ -554,6 +683,7 @@ export async function ticketWorkflow(rawInput: TicketWorkflowInput): Promise<Tic
         result.snapshot.status === targetBoardState &&
         !ticketContextChanged(run, result.snapshot)
       ) {
+        await projectSlackStatus(targetStatus);
         return;
       }
       reconcileProjectChange(
@@ -577,13 +707,42 @@ export async function ticketWorkflow(rawInput: TicketWorkflowInput): Promise<Tic
         delivery.workflow.interventions,
       );
     }
+    await projectSlackStatus(
+      result.kind === "updated" && result.snapshot.status === targetBoardState
+        ? targetStatus
+        : run.status,
+    );
   }
 
-  function agentActivityContext(phase: keyof WorkflowAgentRoles): {
+  async function projectSlackStatus(status: TicketStatus): Promise<void> {
+    if (!slackConfiguration.enabled || slackSurface === undefined) return;
+    try {
+      await slackActivities.updateTicketSlackSurface({
+        workflowId: run.workflowId,
+        projectItemId: input.projectItemId,
+        ticket: run.ticket,
+        status,
+        ...(run.implementation === undefined
+          ? {}
+          : { pullRequestNumber: run.implementation.pullRequestNumber }),
+        surface: slackSurface,
+        slack: slackConfiguration,
+      });
+    } catch {
+      // Slack status is a repairable projection and never changes delivery authority.
+    }
+  }
+
+  function agentActivityContext(
+    phase: keyof WorkflowAgentRoles,
+    recoveryCommands: AcceptedSlackCommand[] = [],
+  ): {
     agent: AgentProfileSnapshot;
     skillSelectors: RuntimeDeliveryProfile["skillSelectors"];
     declarationDigest: string;
     workflowProfile: string;
+    slackSession?: NonNullable<AgentActivityContext["slackSession"]>;
+    recoveryCommands?: AcceptedSlackCommand[];
   } {
     const agentId = delivery.workflow.agents[phase];
     const agent = delivery.agents[agentId];
@@ -595,33 +754,113 @@ export async function ticketWorkflow(rawInput: TicketWorkflowInput): Promise<Tic
       skillSelectors: delivery.skillSelectors,
       declarationDigest: delivery.declarationDigest,
       workflowProfile: `${delivery.workflow.id}@${delivery.workflow.version}`,
+      ...(slackSurface === undefined || !slackConfiguration.enabled
+        ? {}
+        : {
+            slackSession: {
+              workflowId: run.workflowId,
+              surface: slackSurface,
+              flushIntervalMilliseconds: slackConfiguration.streamFlushIntervalMilliseconds,
+              defaultMode: slackConfiguration.steering.defaultMode,
+            },
+          }),
+      ...(recoveryCommands.length === 0 ? {} : { recoveryCommands }),
     };
   }
 
   async function runAgentActivity<Value>(
     phase: string,
-    execute: (executionId: ExecutionId) => Promise<{ value: Value; audit: ExecutionAuditRecord }>,
+    execute: (
+      executionId: ExecutionId,
+      recoveryCommands: AcceptedSlackCommand[],
+    ) => Promise<{ value: Value; audit: ExecutionAuditRecord }>,
   ): Promise<{ value: Value; audit: ExecutionAuditRecord } | undefined> {
-    executionSequence += 1;
-    const executionId = executionIdSchema.parse(
-      `${run.workflowId}:${executionSequence.toString().padStart(4, "0")}:${phase}`,
-    );
-    activeExecutionIds.add(executionId);
-    const scope = new CancellationScope();
-    activeScopes.add(scope);
-    try {
-      return await scope.run(() => execute(executionId));
-    } catch (error) {
-      applyQueuedEvents();
-      if (isCancellation(error) && interventionCancelledScopes.has(scope)) {
-        return undefined;
+    const recoveryCommands: AcceptedSlackCommand[] = [];
+    for (;;) {
+      executionSequence += 1;
+      const executionId = executionIdSchema.parse(
+        `${run.workflowId}:${executionSequence.toString().padStart(4, "0")}:${phase}`,
+      );
+      activeExecutionIds.add(executionId);
+      const scope = new CancellationScope();
+      activeScopes.add(scope);
+      const execution = scope
+        .run(() => execute(executionId, recoveryCommands))
+        .then(
+          (value): AgentActivityOutcome<Value> => ({ kind: "result", value }),
+          (error: unknown): AgentActivityOutcome<Value> => ({ kind: "failure", error }),
+        );
+      try {
+        for (;;) {
+          const wake = await Promise.race([
+            execution,
+            condition(() => pendingForExecution(executionId).length > 0).then(
+              (): AgentCommandWake => ({ kind: "command" }),
+            ),
+          ]);
+          if (wake.kind === "result") return wake.value;
+          if (wake.kind === "failure") {
+            applyQueuedEvents();
+            if (isCancellation(wake.error) && interventionCancelledScopes.has(scope)) {
+              return undefined;
+            }
+            throw asError(wake.error);
+          }
+          const candidates = pendingForExecution(executionId);
+          const commandIds = candidates.map((command) => command.reference.commandId);
+          const delivery = await Promise.race([
+            execution,
+            condition(
+              () => commandIds.every((commandId) => !pendingSlackCommands.has(commandId)),
+              slackConfiguration.enabled
+                ? slackConfiguration.controlDeliveryTimeoutSeconds * 1_000
+                : 5_000,
+            ).then((delivered): AgentDeliveryWake => ({ kind: "delivery", delivered })),
+          ]);
+          if (delivery.kind === "result") return delivery.value;
+          if (delivery.kind === "failure") {
+            applyQueuedEvents();
+            if (isCancellation(delivery.error) && interventionCancelledScopes.has(scope)) {
+              return undefined;
+            }
+            throw asError(delivery.error);
+          }
+          if (delivery.delivered) continue;
+          const fallbackCommands = commandIds
+            .map((commandId) => pendingSlackCommands.get(commandId))
+            .filter((command): command is AcceptedSlackCommand => command !== undefined);
+          for (const command of fallbackCommands) {
+            pendingSlackCommands.delete(command.reference.commandId);
+          }
+          scope.cancel();
+          const cancelled = await execution;
+          applyQueuedEvents();
+          if (cancelled.kind === "failure") {
+            if (isCancellation(cancelled.error) && interventionCancelledScopes.has(scope)) {
+              return undefined;
+            }
+            if (isCancellation(cancelled.error) && fallbackCommands.length > 0) {
+              recoveryCommands.push(...fallbackCommands);
+              break;
+            }
+            throw asError(cancelled.error);
+          }
+          return cancelled.value;
+        }
+      } finally {
+        interventionCancelledScopes.delete(scope);
+        activeScopes.delete(scope);
+        activeExecutionIds.delete(executionId);
       }
-      throw error;
-    } finally {
-      interventionCancelledScopes.delete(scope);
-      activeScopes.delete(scope);
-      activeExecutionIds.delete(executionId);
     }
+  }
+
+  function pendingForExecution(executionId: ExecutionId): AcceptedSlackCommand[] {
+    const firstActive = [...activeExecutionIds].sort()[0];
+    if (firstActive !== executionId) return [];
+    return [...pendingSlackCommands.values()].filter(
+      (command) => command.reference.mode !== "cancel",
+    );
   }
 
   function cancelActiveExecutions(): void {
@@ -712,6 +951,10 @@ function reconcileProjectChange(
 
 function ticketContextChanged(run: TicketRun, snapshot: ProjectItemSnapshot): boolean {
   return !ticketContextsEqual(run.ticket, snapshot.ticket);
+}
+
+function asError(value: unknown): Error {
+  return value instanceof Error ? value : new Error(String(value));
 }
 
 function applyTicketContextChange(

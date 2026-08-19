@@ -16,6 +16,7 @@ import {
 } from "./package-builder.js";
 import { assembledUserPrompt } from "./prompt.js";
 import { FakeHarness, HarnessRouter } from "./router.js";
+import { discardAgentEvents, noAgentControls } from "./types.js";
 
 const resources = path.resolve(import.meta.dirname, "../../../resources");
 const skillSelectors: SkillSelector[] = [
@@ -175,6 +176,8 @@ describe("HarnessRouter", () => {
     router.register(fake);
     const result = await router.execute(
       { package: executionPackage, workspace: "/tmp/repo" },
+      discardAgentEvents,
+      noAgentControls(),
       new AbortController().signal,
     );
     expect(result.packageDigest).toBe(executionPackage.digest);
@@ -207,6 +210,8 @@ describe("HarnessRouter", () => {
     await expect(
       router.execute(
         { package: executionPackage, workspace: "/tmp/repository" },
+        discardAgentEvents,
+        noAgentControls(),
         new AbortController().signal,
       ),
     ).rejects.toMatchObject({ code: "invalid_response", retryable: false });

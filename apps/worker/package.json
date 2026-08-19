@@ -8,9 +8,11 @@
     "start": "node dist/main.js"
   },
   "dependencies": {
+    "@temporalio/client": "1.22.0",
     "@temporalio/worker": "1.22.0",
     "@thor/agent": "0.1.0",
     "@thor/runtime": "0.1.0",
+    "@thor/slack": "0.1.0",
     "@thor/workflows": "0.1.0"
   }
 }
