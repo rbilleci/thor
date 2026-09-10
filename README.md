@@ -4,6 +4,11 @@ Thor is an autonomous software-delivery orchestrator built on Temporal, GitHub P
 repositories. It runs blueprinting, implementation, parallel review, synthesis, repair, approval,
 deferral, and merge as one durable Workflow per GitHub Project item.
 
+## License
+
+Thor is source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE). Commercial use
+is not permitted under this license. Contact the copyright holder to obtain commercial-use rights.
+
 The canonical architecture and lifecycle rules are in [docs/design.md](docs/design.md). Development
 conventions are in [docs/development.md](docs/development.md), and deployment and recovery
 procedures are in [docs/operations.md](docs/operations.md).
